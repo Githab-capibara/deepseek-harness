@@ -22,7 +22,10 @@ pre-commit:
       stage_fixed: true
 
     - name: whitespace (staged)
-      run: git diff --cached --check
+      # A patch file quotes the upstream source verbatim, including its tab
+      # indentation; the stock check reads the diff marker as a space before
+      # that tab and rejects the upstream code it quotes.
+      run: node_modules/.bin/tsx scripts/verify-staged-whitespace.ts
 
     - name: pi-ai provider metadata
       glob: '{pnpm-lock.yaml,packages/llm/llm-pi-ai/package.json,packages/llm/llm-pi-ai/scripts/gen-provider-data.ts,packages/llm/llm-pi-ai/src/provider-data.generated.ts}'

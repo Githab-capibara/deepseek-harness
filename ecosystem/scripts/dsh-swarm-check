@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Drive one complex task through the fork's swarm and report what happened.
+
+The task splits into independent parts on purpose: the harness must dispatch a
+swarm, give every worker its own worktree, and merge the results back into the
+main branch.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+CLI = os.path.join(REPO, 'apps', 'cli', 'lib', 'bin.js')
+TASK = (
+    'В этом репозитории создай три независимых Python-модуля в каталоге '
+    'ecosystem-check/: модуль a.py с функцией alpha(), модуль b.py с функцией '
+    'beta(), модуль c.py с функцией gamma(). Каждый модуль реализует свой '
+    'алгоритм: a.py — факториал, b.py — последовательность Фибоначчи, '
+    'c.py — проверку простоты числа. Добавь тест test_modules.py, который '
+    'проверяет все три функции. Это задача из трёх независимых подсистем, '
+    'каждая требует своей реализации и своей проверки.'
+)
+
+
+def main() -> int:
+    result = subprocess.run(
+        ['node', CLI, '--profile', 'headless', TASK],
+        capture_output=True, text=True, timeout=5400, cwd=REPO,
+    )
+    output = result.stdout + result.stderr
+    with open('/tmp/opencode/swarm-e2e.log', 'w', encoding='utf-8') as fh:
+        fh.write(output)
+    swarm_calls = sorted(set(re.findall(r'swarm_[a-z_]+', output)))
+    worktree_paths = sorted(set(re.findall(r'\.dsh/worktrees/[^\s\'"]+', output)))
+    print(f'exit code: {result.returncode}')
+    print(f'swarm tools used: {swarm_calls}')
+    print(f'worktrees mentioned: {len(worktree_paths)}')
+    for path in worktree_paths[:8]:
+        print(f'  {path}')
+    failures = [line for line in output.splitlines()
+                if re.search(r'\((?:[a-z@/-]+)\): (?:Error|TypeError)', line)]
+    if failures:
+        print(f'\nplugin failures: {len(failures)}')
+        for line in failures[:5]:
+            print(f'  {line}')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -3,7 +3,6 @@
   "private": true,
   "dependencies": {
     "@doiiarx/dsh-todo-continuation": "github:DoiiarX/dsh-todo-continuation",
-    "@ohmejj/dsh-auto-compact": "^0.1.0",
     "dsh-git-worktree": "github:KHG420/git-worktree",
     "dsh-gitnexus-plugin": "github:akash-digitavision/dsh-gitnexus-plugin",
     "dsh-context-decay": "github:LDyty/dsh-context-decay",
@@ -40,7 +39,6 @@
         "dsh-task-reliability",
         "dsh-protect-tests",
         "dsh-plugin-stalegreen",
-        "@ohmejj/dsh-auto-compact",
         "dsh-ultracode",
         "dsh-subagent-guard",
         "dsh-verify-kit",

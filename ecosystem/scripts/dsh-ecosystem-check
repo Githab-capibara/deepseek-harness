@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Check that every profile boots the full ecosystem from the fork checkout.
+
+Each profile must load every plugin row the ecosystem provides, and the runtime
+packages it resolves must come from the fork, not from an npm release.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+CLI = os.path.join(REPO, 'apps', 'cli', 'lib', 'bin.js')
+PROFILES = ['web', 'ultracode', 'dsh-tui', 'desktop', 'decay', 'headless']
+
+# Plugin rows the ecosystem must contribute to every profile.
+REQUIRED_ROWS = [
+    'dsh-local-ru',
+    'dsh-subagent-compat',
+    'dsh-swarm-autonomy-guard',
+    'dsh-swarm-worktree',
+    'dsh-baseline',
+    'dsh-auto-review',
+    'dsh-second-review',
+    'dsh-stall-guard',
+    'dsh-session-retry',
+    'dsh-agent-frugality',
+    'dsh-swarm-orchestrator',
+    'dsh-task-reliability',
+    'dsh-protect-tests',
+]
+
+# The UltraCode working mode reaches every profile through the preset row the
+# profile template inserts; the file-copying installer plugin is not part of the
+# runtime contract.
+REQUIRED_PRESET = 'preset-ultracode'
+
+# The desktop profile belongs to the Electron carrier, which boots it itself;
+# the CLI refuses that profile by design.
+DESKTOP_OWNED = {'desktop'}
+
+
+def rows(dump: str) -> set[str]:
+    """Every entry id and plugin name present in a dumped configuration."""
+    found = set()
+    for line in dump.splitlines():
+        match = re.match(r'^- id: (.+)$', line)
+        if match:
+            found.add(match.group(1).strip().strip("'"))
+        match = re.match(r'^  name: (.+)$', line)
+        if match:
+            found.add(match.group(1).strip().strip("'"))
+    return found
+
+
+def main() -> int:
+    failures = 0
+    for profile in PROFILES:
+        if profile in DESKTOP_OWNED:
+            print(f'SKIP {profile}: the Electron carrier boots this profile')
+            continue
+        result = subprocess.run(
+            ['node', CLI, '--profile', profile, '--dump-config'],
+            capture_output=True, text=True, timeout=600, cwd=REPO,
+        )
+        dump = result.stdout + result.stderr
+        if result.returncode != 0:
+            print(f'FAIL {profile}: dsh exited {result.returncode}')
+            failures += 1
+            continue
+        skipped = dump.count('skipping profile bundle')
+        present = rows(dump)
+        missing = [row for row in REQUIRED_ROWS
+                   if row not in present and profile not in DESKTOP_OWNED]
+        if REQUIRED_PRESET not in present and profile not in DESKTOP_OWNED:
+            missing.append(REQUIRED_PRESET)
+        # The runtime packages must resolve into the fork checkout.
+        foreign = re.findall(r'@deepseek-ai/dsh-[a-z-]+ 0\.2\.2-rc\.1', dump)
+        if skipped:
+            print(f'FAIL {profile}: {skipped} bundle(s) skipped')
+            failures += 1
+        if missing:
+            print(f'FAIL {profile}: missing plugin rows {missing}')
+            failures += 1
+        if foreign:
+            print(f'FAIL {profile}: runtime resolved from npm {sorted(set(foreign))}')
+            failures += 1
+        if not skipped and not missing and not foreign:
+            print(f'OK   {profile}: {len(present)} rows, ecosystem complete')
+    if failures:
+        print(f'\n{failures} profile(s) failed')
+        return 1
+    print('\nall profiles boot the ecosystem from the fork checkout')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -5,7 +5,7 @@ same plugin stack.
 Profiles (all boot the same plugins, only the app surface differs):
 
   web        browser dashboard + always-on systemd service
-  ultracode  TUI (dsh-tui 0.19.0) with the UltraCode preset
+  ultracode  TUI (dsh-tui 0.20.1) with the UltraCode preset
   dsh-tui    plain TUI surface, same stack
   desktop    the desktop client's own profile (Electron carrier boots it)
   decay      web surface where dsh-context-decay owns context reduction
@@ -63,8 +63,10 @@ def local_runtime() -> dict[str, str]:
 
 
 PLUGIN_DEPS = {
-    "@doiiarx/dsh-todo-continuation": "github:DoiiarX/dsh-todo-continuation",
-    "@ohmejj/dsh-auto-compact": "^0.1.0",
+    # Pinned to the upstream commit that carries the config-driven settings
+    # port: a plain `github:` specifier resolves to whatever the registry
+    # cached, which may predate this runtime.
+    "@doiiarx/dsh-todo-continuation": "github:DoiiarX/dsh-todo-continuation#52e2eb44e5a53605331d8938c76dd3783b327ef6",
     "dsh-git-worktree": "github:KHG420/git-worktree",
     "dsh-gitnexus-plugin": "github:akash-digitavision/dsh-gitnexus-plugin",
     "dsh-context-decay": "github:LDyty/dsh-context-decay",
@@ -117,8 +119,6 @@ PLUGIN_BUNDLES = [
     "dsh-task-reliability",
     "dsh-protect-tests",
     "dsh-plugin-stalegreen",
-    "@ohmejj/dsh-auto-compact",
-    "dsh-ultracode",
     "dsh-subagent-guard",
     "dsh-verify-kit",
     "dsh-verify-judge",
@@ -145,9 +145,9 @@ PROFILES_SPEC = {
     "web": {"app": "@deepseek-ai/dsh-web-app", "registry": "agent-preset-registry",
             "store": "swarm", "app_dep": None},
     "ultracode": {"app": "@deepseek-harness-tui/dsh-tui", "registry": "dsh-tui-agent-preset-registry",
-                  "store": "swarm-tui", "app_dep": ("@deepseek-harness-tui/dsh-tui", "0.19.0")},
+                  "store": "swarm-tui", "app_dep": ("@deepseek-harness-tui/dsh-tui", "0.20.1")},
     "dsh-tui": {"app": "@deepseek-harness-tui/dsh-tui", "registry": "dsh-tui-agent-preset-registry",
-                "store": "swarm-tui2", "app_dep": ("@deepseek-harness-tui/dsh-tui", "0.19.0")},
+                "store": "swarm-tui2", "app_dep": ("@deepseek-harness-tui/dsh-tui", "0.20.1")},
     "desktop": {"app": "@deepseek-ai/dsh-web-app", "registry": "agent-preset-registry",
                 "store": "swarm-desktop", "app_dep": None},
     "decay": {"app": "@deepseek-ai/dsh-web-app", "registry": "agent-preset-registry",
@@ -196,20 +196,6 @@ PRESET_COMPACTION_REPLACEMENT = """                  # The preset's automatic co
                   # `/compact` command stays available as an emergency fallback.
 """
 
-AUTO_COMPACT_OLD = """- id: auto-compact-settings
-  name: '@ohmejj/dsh-auto-compact'
-  config:
-    auto: true
-"""
-AUTO_COMPACT_NEW = """- id: auto-compact-settings
-  name: '@ohmejj/dsh-auto-compact'
-  config:
-    # The automatic reducer yields to the model-driven dsh-context-decay:
-    # both must never compress the same history. `/compact` remains manual.
-    auto: false
-"""
-
-
 def build_patch(spec, store, name):
     with open(os.path.join(TEMPLATE, "cordis.patch.yml"), encoding="utf-8") as fh:
         text = fh.read()
@@ -233,8 +219,6 @@ def build_patch(spec, store, name):
         text = text.replace(PRESET_COMPACTION_BLOCK, PRESET_COMPACTION_REPLACEMENT, 1)
     elif "- id: compaction" in text and "intentionally" not in text:
         raise SystemExit("preset compaction block shape changed; refusing to patch")
-    if AUTO_COMPACT_OLD in text:
-        text = text.replace(AUTO_COMPACT_OLD, AUTO_COMPACT_NEW, 1)
     return text
 
 
@@ -264,6 +248,17 @@ RUNTIME_PACKAGES = {
 }
 
 
+# Third-party plugins whose published code still calls APIs this runtime
+# removed. Each patch is a file under the profile template's patches/ directory.
+PROFILE_PATCHES = {
+    "dsh-plugin-stalegreen@0.1.0": "dsh-plugin-stalegreen@0.1.0.patch",
+    "dsh-session-retry@0.3.0": "dsh-session-retry@0.3.0.patch",
+    "dsh-swarm-orchestrator@0.6.34": "dsh-swarm-orchestrator@0.6.34.patch",
+    "dsh-task-reliability@0.4.11": "dsh-task-reliability@0.4.11.patch",
+    "dsh-verify-judge@0.2.0": "dsh-verify-judge@0.2.0.patch",
+}
+
+
 def build_workspace_yaml() -> str:
     """The profile's pnpm workspace: runtime packages linked to the fork."""
     lines = [
@@ -272,7 +267,7 @@ def build_workspace_yaml() -> str:
         "nodeLinker: hoisted",
         "autoInstallPeers: false",
         "minimumReleaseAgeExclude:",
-        "  - '@deepseek-harness-tui/dsh-tui@0.19.0'",
+        "  - '@deepseek-harness-tui/dsh-tui@0.20.1'",
         "  - dsh-swarm-orchestrator@0.6.34",
         "  - '@goodandready/dsh-russian-lang@0.4.27'",
         "  - dsh-auto-review@0.15.1",
@@ -284,6 +279,11 @@ def build_workspace_yaml() -> str:
         lines.append(f"  '{name}': 'link:{os.path.join(REPO_ROOT, relative)}'")
     lines.append("  '@deepseek-ai/cosmokit': 'link:%s'" % os.path.join(REPO_ROOT, "vendor", "cosmokit"))
     lines.append("  '@deepseek-ai/schemastery': 'link:%s'" % os.path.join(REPO_ROOT, "vendor", "schemastery"))
+    lines.append("")
+    lines.append("# Third-party plugins that still call APIs this runtime removed.")
+    lines.append("patchedDependencies:")
+    for package, patch in sorted(PROFILE_PATCHES.items()):
+        lines.append(f"  '{package}': patches/{patch}")
     return "\n".join(lines) + "\n"
 
 

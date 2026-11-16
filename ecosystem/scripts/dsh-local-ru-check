@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Check that the Web surface serves the ecosystem's Russian dictionaries.
+
+The browser loads combined client bundles; the local-locale plugin must be part
+of them, and every key it declares must reach the browser as served bytes.
+"""
+import http.cookiejar
+import os
+import re
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+
+BASE = 'http://127.0.0.1:3080'
+PLUGIN_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    'ecosystem', 'plugins', 'dsh-local-ru',
+)
+
+
+def journal_url() -> str:
+    out = subprocess.run(
+        ['journalctl', '--user', '-u', 'dsh-web.service', '--no-pager', '-n', '300'],
+        capture_output=True, text=True, timeout=60,
+    ).stdout
+    matches = re.findall(r'http://127\.0\.0\.1:3080/\?token=([A-Za-z0-9_-]+)', out)
+    if not matches:
+        raise SystemExit('no web URL in the service journal')
+    return matches[-1]
+
+
+def declared_keys() -> set[str]:
+    """Every dictionary key the plugin's tables declare."""
+    keys: set[str] = set()
+    tables = os.path.join(PLUGIN_DIR, 'lib', 'tables')
+    for name in sorted(os.listdir(tables)):
+        if not name.endswith('.js'):
+            continue
+        with open(os.path.join(tables, name), encoding='utf-8') as fh:
+            text = fh.read()
+        keys.update(re.findall(r"['\"]([A-Za-z][A-Za-z0-9._-]*)['\"]\s*:", text))
+    return keys
+
+
+def main() -> int:
+    token = journal_url()
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    opener.open(f'{BASE}/?token={urllib.parse.quote(token)}', timeout=60).read()
+    html = opener.open(f'{BASE}/', timeout=60).read().decode('utf-8')
+    if 'dsh-local-ru' not in html:
+        print('FAIL: the local-locale plugin is not part of the client graph')
+        return 1
+    combos = re.findall(r'plugins/\?\?[^"]+&rev=[a-f0-9]+', html)
+    if not combos:
+        print('FAIL: the page carries no combined client bundle')
+        return 1
+    carrying = [combo for combo in combos if 'dsh-local-ru' in combo]
+    if not carrying:
+        print('FAIL: no combined bundle carries the local-locale plugin')
+        return 1
+    body = ''
+    for combo in carrying:
+        body += opener.open(f'{BASE}/{combo}', timeout=120).read().decode('utf-8')
+    declared = declared_keys()
+    served = {key for key in declared if f'"{key}"' in body}
+    missing = sorted(declared - served)
+    if missing:
+        print(f'FAIL: {len(missing)} of {len(declared)} dictionary keys are not served')
+        for key in missing[:10]:
+            print(f'  missing {key}')
+        return 1
+    print(f'OK: all {len(declared)} dictionary keys are served to the browser')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

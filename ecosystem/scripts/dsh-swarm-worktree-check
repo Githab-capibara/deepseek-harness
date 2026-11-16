@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Prove the swarm worktree cycle on a real repository.
+
+The plugin gives every swarm worker its own worktree and merges the worker's
+commit back into the main branch when the task is accepted. This drives that
+cycle without a model provider: it creates a temporary repository, runs the
+plugin's worktree helpers against it, commits inside the worktree, and checks
+that the main branch received the commit.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+PLUGIN = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    'ecosystem', 'plugins', 'dsh-swarm-worktree', 'lib', 'index.js',
+)
+
+
+def git(cwd: str, *args: str) -> str:
+    result = subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise SystemExit(f'git {" ".join(args)} failed: {result.stderr.strip()}')
+    return result.stdout.strip()
+
+
+def main() -> int:
+    if not os.path.exists(PLUGIN):
+        print(f'FAIL: plugin not found at {PLUGIN}')
+        return 1
+    work = tempfile.mkdtemp(prefix='dsh-swarm-worktree-check-')
+    try:
+        repo = os.path.join(work, 'repo')
+        os.makedirs(repo)
+        git(repo, 'init', '-q', '-b', 'main')
+        git(repo, 'config', 'user.name', 'dsh-check')
+        git(repo, 'config', 'user.email', 'dsh-check@local')
+        with open(os.path.join(repo, 'README.md'), 'w', encoding='utf-8') as fh:
+            fh.write('base\n')
+        git(repo, 'add', 'README.md')
+        git(repo, 'commit', '-qm', 'base')
+
+        # The plugin's own helpers: the slug names the branch and the directory.
+        probe = subprocess.run(
+            ['node', '--input-type=module', '-e', f'''
+import {{ worktreeSlug, repoRootOf, currentBranch }} from 'file://{PLUGIN}'
+const slug = worktreeSlug('task-1', 'x')
+const root = await repoRootOf({json.dumps(repo)})
+const branch = await currentBranch({json.dumps(repo)})
+console.log(JSON.stringify({{ slug, root, branch }}))
+'''],
+            capture_output=True, text=True, timeout=300,
+        )
+        if probe.returncode != 0:
+            print(f'FAIL: plugin helpers failed: {probe.stderr.strip()[:300]}')
+            return 1
+        facts = json.loads(probe.stdout.strip().splitlines()[-1])
+        slug = facts['slug']
+        if facts['root'] != os.path.realpath(repo):
+            print(f"FAIL: repoRootOf returned {facts['root']}")
+            return 1
+        if facts['branch'] != 'main':
+            print(f"FAIL: currentBranch returned {facts['branch']}")
+            return 1
+        if 'task-1' not in slug:
+            print(f'FAIL: slug does not carry the task id: {slug}')
+            return 1
+
+        # The cycle the plugin drives: a worktree branch, a commit inside it, and
+        # a merge back into the main branch.
+        worktree = os.path.join(repo, '.dsh', 'worktrees', slug)
+        branch = f'worktree-swarm-{slug}'
+        os.makedirs(os.path.dirname(worktree), exist_ok=True)
+        git(repo, 'worktree', 'add', '-q', '-b', branch, worktree)
+        with open(os.path.join(worktree, 'worker.txt'), 'w', encoding='utf-8') as fh:
+            fh.write('worker output\n')
+        git(worktree, 'add', 'worker.txt')
+        git(worktree, 'commit', '-qm', 'worker output')
+        merge = subprocess.run(
+            ['git', 'merge', '--no-ff', '--no-edit', branch],
+            cwd=repo, capture_output=True, text=True, timeout=120,
+        )
+        if merge.returncode != 0:
+            print(f'FAIL: merge failed: {merge.stderr.strip()}')
+            return 1
+        if not os.path.exists(os.path.join(repo, 'worker.txt')):
+            print('FAIL: the main branch did not receive the worker output')
+            return 1
+        log = git(repo, 'log', '--oneline', '-3')
+        if 'worker output' not in log:
+            print(f'FAIL: the merge commit is missing from the log: {log}')
+            return 1
+        print(f'OK: worktree slug {slug}, branch {branch}, worker commit merged into main')
+        return 0
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

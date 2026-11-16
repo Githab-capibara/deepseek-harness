@@ -108,8 +108,8 @@
                             When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
                   # The preset's automatic compaction group is intentionally
                   # absent: dsh-context-decay is the single context reducer in
-                  # every profile (host `compaction-basic.auto`, the in-place
-                  # surface rewriters and @ohmejj/dsh-auto-compact are all off).
+                  # every profile (host `compaction-basic.auto` and the in-place
+                  # surface rewriters are all off).
                   # Two reducers must never run at the same time. The manual
                   # `/compact` command stays available as an emergency fallback.
                   - id: delegation
@@ -193,25 +193,7 @@
     workspaceRunPolicy: warn
     requireManualEndorsement: false
 
-# ── 4. Auto-compact: LATE trigger (0.92) ───────────────────────────
-# Stop compacting at 80% of the window; compact at 92% so large contexts
-# are actually used before the summary pass burns tokens.
-- id: auto-compact-settings
-  name: '@ohmejj/dsh-auto-compact'
-  config:
-    # The automatic reducer yields to the model-driven dsh-context-decay:
-    # both must never compress the same history. `/compact` remains manual.
-    auto: false
-    thresholdRatio: 0.92
-    headroomTokens: 65536
-    retainRatio: 0.16
-    summarizationProvider: ''
-    summarizationModel: ''
-    maxTokens: 8192
-    compactionRetries: 2
-    maxOverflowRetries: 2
-
-# ── 5. Subagent guard: three gates on every child agent ────────────
+# ── 4. Subagent guard: three gates on every child agent ────────────
 #   * sandbox ceiling  - a child can never exceed workspace-write
 #   * destructive-command denylist (Windows defaults + Linux additions)
 #   * delegate tool    - pins the child's tool set and system prompt
@@ -268,7 +250,7 @@
       - ">\\s*/dev/(?:sd|nvme|hd)[a-z0-9]"
       - "\\b:\\(\\)\\s*\\{\\s*:\\|:&\\s*\\};:"
 
-# ── 6. Protect-tests: refuse weakened assertions ────────────────────
+# ── 5. Protect-tests: refuse weakened assertions ────────────────────
 - id: protect-tests
   config:
     mode: deny
@@ -278,7 +260,7 @@
     minAssertionsRemoved: 2
     minTestsRemoved: 1
 
-# ── 7. Task reliability: survive flaky providers and restarts ───────
+# ── 6. Task reliability: survive flaky providers and restarts ───────
 - id: task-reliability
   config:
     retryMax: 5
@@ -295,7 +277,7 @@
     autopilot: false
     notifyOnLoop: false
 
-# ── 8. Subagent compatibility shim ─────────────────────────────────
+# ── 7. Subagent compatibility shim ─────────────────────────────────
 # DSH 0.2.x renamed `subagents.start(provider, request)` to
 # `subagents.startActivation({provider, label, request, signal, delivery})`.
 # dsh-swarm-orchestrator 0.6.x still calls the legacy entry point, so every
@@ -306,7 +288,7 @@
     - id: subagent-compat
       name: dsh-subagent-compat
 
-# ── 9. Swarm autonomy guard ───────────────────────────────────────
+# ── 8. Swarm autonomy guard ───────────────────────────────────────
 # The swarm and the UltraCode persona are in place, but the agent still often
 # started editing files one by one instead of fanning out. The guard blocks
 # the SECOND file of a turn and tells the agent to dispatch a swarm of agents;
@@ -318,7 +300,7 @@
         mode: deny
         debug: true
 
-# ── 11. Надёжность, безопасность, автоматизация ────────────────────
+# ── 9. Надёжность, безопасность, автоматизация ────────────────────
 # Разбор реальной траектории (468 шагов, 8ч40м, 27 ошибок) показал:
 #  - dedup-цикл одинаковых read-вызовов (шаги 158-169);
 #  - шаги по 4-8 минут из-за нестабильного провайдера;
