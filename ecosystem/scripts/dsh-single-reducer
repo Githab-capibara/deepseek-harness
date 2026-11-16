@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Keep exactly one context reducer active.
+
+`dsh-context-decay` is the model-driven reducer for every profile. The
+upstream auto-compaction (`@deepseek-ai/dsh-compaction-basic`, `auto` defaults
+to true) is switched off on the host rows, but every bundled agent preset
+carries its own isolated `compaction-basic` row without an explicit `auto`
+value, so selecting a non-default preset would start a second reducer.
+
+This script adds `config: { auto: false }` to every `compaction-basic` row
+found in the preset compositions shipped by the bundles, so no preset can
+compress the same history twice. It is idempotent and only touches the
+installed packages, like `dsh-host-seam` does for the runtime.
+"""
+import os
+import re
+import sys
+
+MARKER = "dsh-single-reducer"
+
+GLOBAL_ROOT = "/home/d/.local/share/mise/installs/node/26.8.1/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai"
+PROFILES_ROOT = "/home/d/.dsh/profiles"
+
+ROOTS = [
+    os.path.join(GLOBAL_ROOT, "dsh-web-app", "presets"),
+    os.path.join(GLOBAL_ROOT, "dsh-base", "presets"),
+    os.path.join(GLOBAL_ROOT, "dsh-agent-preset", "presets"),
+]
+
+PROFILE_PRESET_DIRS = [
+    "node_modules/@deepseek-harness-tui/dsh-tui/presets",
+    "node_modules/@deepseek-ai/dsh-web-app/presets",
+    "node_modules/@deepseek-ai/dsh-agent-preset/presets",
+]
+
+ID_RE = re.compile(r"^(\s*)- id: compaction-basic\s*$")
+
+
+def patch_file(path: str) -> bool:
+    with open(path, encoding="utf-8") as fh:
+        lines = fh.readlines()
+
+    changed = False
+    index = 0
+    while index < len(lines):
+        match = ID_RE.match(lines[index])
+        if not match:
+            index += 1
+            continue
+        entry_indent = len(match.group(1))
+        child_indent = entry_indent + 2
+        # Collect the block that belongs to this entry.
+        end = index + 1
+        while end < len(lines):
+            line = lines[end]
+            if not line.strip():
+                end += 1
+                continue
+            indent = len(line) - len(line.lstrip())
+            if indent <= entry_indent:
+                break
+            end += 1
+        block = lines[index:end]
+        if any("auto: false" in line for line in block):
+            index = end
+            continue
+
+        # Locate the `config:` mapping of this entry, if any.
+        config_at = None
+        for offset, line in enumerate(block):
+            if line.strip().startswith("config:"):
+                config_at = offset
+                break
+        if config_at is None:
+            # Insert a config mapping right after the `name:` line.
+            insert_at = index + 1
+            for offset, line in enumerate(block):
+                if line.strip().startswith("name:"):
+                    insert_at = index + offset + 1
+                    break
+            pad = " " * child_indent
+            block[insert_at - index:insert_at - index] = [
+                f"{pad}config:\n",
+                f"{pad}  auto: false  # {MARKER}: dsh-context-decay is the only reducer\n",
+            ]
+        else:
+            # Append `auto: false` into the existing config mapping.
+            insert_at = index + config_at + 1
+            while insert_at < end:
+                line = lines[insert_at]
+                if not line.strip():
+                    insert_at += 1
+                    continue
+                indent = len(line) - len(line.lstrip())
+                if indent <= child_indent:
+                    break
+                insert_at += 1
+            pad = " " * (child_indent + 2)
+            lines[insert_at:insert_at] = [
+                f"{pad}auto: false  # {MARKER}: dsh-context-decay is the only reducer\n"
+            ]
+            changed = True
+            index = insert_at + 1
+            continue
+        lines[index:end] = block
+        changed = True
+        index = index + len(block)
+
+    if changed:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.writelines(lines)
+    return changed
+
+
+def collect_files() -> list[str]:
+    files = []
+    for root in ROOTS:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _, filenames in os.walk(root):
+            for name in filenames:
+                if name.endswith((".yml", ".yaml")):
+                    files.append(os.path.join(dirpath, name))
+    if os.path.isdir(PROFILES_ROOT):
+        for profile in sorted(os.listdir(PROFILES_ROOT)):
+            for relative in PROFILE_PRESET_DIRS:
+                root = os.path.join(PROFILES_ROOT, profile, relative)
+                if not os.path.isdir(root):
+                    continue
+                for dirpath, _, filenames in os.walk(root):
+                    for name in filenames:
+                        if name.endswith((".yml", ".yaml")):
+                            files.append(os.path.join(dirpath, name))
+    return sorted(set(files))
+
+
+def main() -> int:
+    touched = []
+    for path in collect_files():
+        try:
+            if patch_file(path):
+                touched.append(path)
+        except Exception as exc:  # noqa: BLE001
+            print(f"{MARKER}: failed on {path}: {exc}", file=sys.stderr)
+    for path in touched:
+        print(f"{MARKER}: patched {path}")
+    print(f"{MARKER}: files changed={len(touched)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

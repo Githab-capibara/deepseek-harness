@@ -1,0 +1,7 @@
+# Layer applied when a profile lists this bundle (dsh plugin add dsh-subagent-compat).
+# Restores the legacy `subagents.start(provider, request)` entry point on
+# DSH 0.2.x hosts, where the service only exposes `startActivation()`.
+# Without it dsh-swarm-orchestrator 0.6.x cannot spawn task agents.
+- insert:
+    - id: subagent-compat
+      name: dsh-subagent-compat

@@ -26,6 +26,8 @@ export interface TokenMeasurement {
   readonly baseline: TokenMeasurementBaseline
   /** Signed repricing of current surface content relative to the baseline anchor. */
   readonly surfaceDeltaTokens: number
+  /** Presentation-only tokens added by an optional request decorator; 0 for usage baselines. */
+  readonly decorationOverheadTokens: number
   /** Non-negative current request-and-response pressure. */
   readonly totalTokens: number
   /** Total route-priced request tokens across the current surface; equals the sum of the node prices. */

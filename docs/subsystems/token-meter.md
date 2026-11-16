@@ -17,6 +17,8 @@ interface TokenMeasurement {
   readonly baseline: TokenMeasurementBaseline
   /** Signed repricing of current surface content relative to the baseline anchor. */
   readonly surfaceDeltaTokens: number
+  /** Presentation-only tokens added by an optional request decorator; 0 for usage baselines. */
+  readonly decorationOverheadTokens: number
   /** Non-negative current request-and-response pressure. */
   readonly totalTokens: number
   /** Total route-priced request tokens across the current surface; equals the sum of the node prices. */
@@ -26,7 +28,7 @@ interface TokenMeasurement {
 }
 ```
 
-Every measurement resolves the effective envelope's routed provider/model to that route's declared request-image pricing through `ctx.llm`, so image occurrences are priced as the visual tokens plus model-visible text the request actually sends; routes and compositions without declared pricing keep the fixed heuristic. `baseline.kind === 'usage'` means the latest successful provider call has the same canonical request envelope and its total is no lower than that call's full route-priced anchor. `estimated` means no reusable conservative usage anchor exists, so the service priced the complete envelope and surface itself. A later successful request replaces the earlier anchor; signed `surfaceDeltaTokens` preserves growth and shrinkage relative to a matching anchor, repricing both sides under the same route. `totalTokens` remains request-and-response pressure, while `surfaceTokens` is the surface-only route-priced total and equals the sum of the node prices.
+Every measurement resolves the effective envelope's routed provider/model to that route's declared request-image pricing through `ctx.llm`, so image occurrences are priced as the visual tokens plus model-visible text the request actually sends; routes and compositions without declared pricing keep the fixed heuristic. `baseline.kind === 'usage'` means the latest successful provider call has the same canonical request envelope and its total is no lower than that call's full route-priced anchor. `estimated` means no reusable conservative usage anchor exists, so the service priced the complete envelope and surface itself. A later successful request replaces the earlier anchor; signed `surfaceDeltaTokens` preserves growth and shrinkage relative to a matching anchor, repricing both sides under the same route. `totalTokens` remains request-and-response pressure, while `surfaceTokens` is the surface-only route-priced total and equals the sum of the node prices. `decorationOverheadTokens` reports the presentation tokens an optional `modelMessageDecoration` provider adds to the request; the meter adds it to heuristic baselines only, because provider usage already contains the decorated request text.
 
 ## `TokenSurfaceNode`
 

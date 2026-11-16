@@ -1,0 +1,66 @@
+diff --git a/index.js b/index.js
+index 3dc4c003c5cd1f352a681cd16c808a4e8f39a1b5..e8c6ad89ddb3533a28c4635f63bbeb0ecf2eb0eb 100644
+--- a/index.js
++++ b/index.js
+@@ -19,7 +19,9 @@ export const name = 'todo-continuation-supervisor'
+ export const inject = ['settings']
+
+ const SETTINGS_NS = 'todo-continuation'
+-const PLUGIN_SOURCE = { kind: 'plugin', plugin: 'todo-continuation' }
++// DSH session format v4 refuses the retired 'plugin' source kind; the
++// producer-owned spelling for a plugin-authored message is 'plugin:<name>'.
++const PLUGIN_SOURCE = { kind: 'plugin:todo-continuation' }
+ const DEFAULT_WAITING_PREFIXES = ['信息不足：', '要求用户确认：']
+ const DEFAULT_NO_TODO_EVERY = 5
+ const DEFAULT_STALE_EVERY = 20
+@@ -36,7 +38,12 @@ function report(ctx, scope, error) {
+ function currentTurnTodos(session, turn) {
+   let insideTurn = false
+   let latest
+-  for (const event of session.events ?? []) {
++  // DSH 0.2.x 去掉了同步的 session.events 数组，事件要通过
++  // session.snapshotEvents() 取（旧宿主仍可能保留 session.events，兜底留着）。
++  const events = typeof session?.snapshotEvents === 'function'
++    ? session.snapshotEvents()
++    : (session?.events ?? [])
++  for (const event of events) {
+     if (event.type === 'turn/start') {
+       insideTurn = event.data?.turn === turn
+       if (insideTurn) latest = undefined
+@@ -99,8 +106,13 @@ function readConfig(scope) {
+ }
+
+ export async function apply(ctx, config = {}) {
+-  console.log('[todo-continuation] apply() invoked, inject settings =', ctx.get('settings') !== undefined)
+   // 1) 注册可持久化的 settings 命名空间（用户在设置页编辑它）。
++  //
++  // DSH 0.2.x 把旧的 settings 命名空间 API（settings.register(ns, schema)）
++  // 换成了新的配置编辑器模型，0.2.2-rc.1 上已经不存在 register()。
++  // 新 API 下插件自己的 Config 行就是唯一的持久化来源，因此这里退回到
++  // row-config 作用域：门禁逻辑保持可用，阈值来自 cordis.patch.yml 里的
++  // config，而不是每轮抛 TypeError。
+   let scope
+   try {
+     const { default: Schema } = await import('schemastery')
+@@ -109,12 +121,18 @@ export async function apply(ctx, config = {}) {
+       noTodoPromptEveryNTurns: config.noTodoPromptEveryNTurns ?? DEFAULT_NO_TODO_EVERY,
+       staleTodoPromptEveryNTurns: config.staleTodoPromptEveryNTurns ?? DEFAULT_STALE_EVERY,
+     }
+-    scope = ctx.settings.register(SETTINGS_NS, Schema.object({
++    const schema = Schema.object({
+       waitingTodoPrefixes: Schema.array(Schema.string()).default(base.waitingTodoPrefixes),
+       noTodoPromptEveryNTurns: Schema.number().default(base.noTodoPromptEveryNTurns),
+       staleTodoPromptEveryNTurns: Schema.number().default(base.staleTodoPromptEveryNTurns),
+-    }), { base })
+-    console.log('[todo-continuation] settings namespace registered OK, scope =', scope !== undefined)
++    })
++    if (typeof ctx.settings?.register === 'function') {
++      scope = ctx.settings.register(SETTINGS_NS, schema, { base })
++    }
++    else {
++      // 新 API：作用域由插件自身的 Config 行提供，读取时直接取 base。
++      scope = { get: () => schema(base) }
++    }
+   } catch (error) {
+     report(ctx, 'settings', error)
+     scope = null

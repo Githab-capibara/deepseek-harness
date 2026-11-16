@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Build the self-contained client bundle of dsh-local-ru.
+
+The client bundle is loaded by the browser through `window.__ModuleLoader__`,
+which evaluates it as a plain script: an ESM `import` inside it never
+resolves. The bundle therefore has to carry the dictionaries inline.
+
+This script reads the per-namespace tables from `lib/tables/*.js` and writes
+one `lib/client.js` with the dictionaries inlined.
+
+Idempotent: the output is fully derived from the sources.
+"""
+import json
+import os
+import re
+import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ECOSYSTEM_DIR = os.path.dirname(SCRIPT_DIR)
+PLUGIN_DIR = os.path.join(ECOSYSTEM_DIR, "plugins", "dsh-local-ru")
+TABLES_DIR = os.path.join(PLUGIN_DIR, "lib", "tables")
+OUT = os.path.join(PLUGIN_DIR, "lib", "client.js")
+
+# The order the namespaces are registered in.
+ORDER = [
+    ("swarm", "swarm.js"),
+    ("dsh-baseline", "baseline.js"),
+    ("contextDecay", "context-decay.js"),
+    ("session-retry", "session-retry.js"),
+    ("dsh.stallGuard", "stall-guard.js"),
+    ("@goodandready/dsh-agent-loop-guard", "loop-guard.js"),
+    ("autoReviewPanel", "auto-review.js"),
+    ("plugin.dsh-protect-tests", "protect-tests.js"),
+]
+
+HEADER = """// Клиентский бандл dsh-local-ru (СГЕНЕРИРОВАН — правьте lib/tables/*.js).
+//
+// Он регистрирует русские словари панелей в locale-рантайме браузера.
+// Каждая панель сначала спрашивает локаль, а потом откатывается на свою
+// английскую таблицу — поэтому словарь должен лежать под тем же
+// namespace'ом.
+//
+// Бандл самодостаточен: браузер исполняет его как обычный скрипт, поэтому
+// ESM-импорты внутри не работают.
+"""
+
+
+def read_table(path: str) -> dict[str, str]:
+    """The `key: 'value'` pairs of a table file."""
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    body = text[text.find("{") + 1:text.rfind("}")]
+    entries: dict[str, str] = {}
+    index = 0
+    length = len(body)
+    while index < length:
+        char = body[index]
+        if char in "\"'":
+            quote = char
+            start = index + 1
+            index = start
+            while index < length and body[index] != quote:
+                if body[index] == "\\":
+                    index += 1
+                index += 1
+            key = body[start:index]
+            index += 1
+            while index < length and body[index] in " \t\r\n":
+                index += 1
+            if index < length and body[index] == ":":
+                index += 1
+                while index < length and body[index] in " \t\r\n":
+                    index += 1
+                if index < length and body[index] in "\"'":
+                    value_quote = body[index]
+                    value_start = index + 1
+                    index = value_start
+                    while index < length and body[index] != value_quote:
+                        if body[index] == "\\":
+                            index += 1
+                        index += 1
+                    entries[key] = body[value_start:index]
+                    index += 1
+                # Skip to the end of the value expression.
+                depth = 0
+                while index < length:
+                    if body[index] in "[{":
+                        depth += 1
+                    elif body[index] in "]}":
+                        depth -= 1
+                    elif body[index] == "," and depth == 0:
+                        break
+                    index += 1
+            continue
+        index += 1
+    return entries
+
+
+def main() -> int:
+    tables: dict[str, dict[str, str]] = {}
+    for namespace, filename in ORDER:
+        path = os.path.join(TABLES_DIR, filename)
+        if not os.path.exists(path):
+            print(f"missing table: {path}", file=sys.stderr)
+            return 1
+        tables[namespace] = read_table(path)
+    payload = json.dumps(tables, ensure_ascii=False, indent=2)
+    with open(OUT, "w", encoding="utf-8") as fh:
+        fh.write(HEADER)
+        fh.write("var TRANSLATIONS = " + payload + ";\n\n")
+        fh.write("""var CONFIG = { enabled: true }
+
+function apply(ctx, config) {
+    var cfg = Object.assign({}, CONFIG, config || {})
+    if (cfg.enabled === false)
+        return
+    var locale = ctx.get('locale')
+    if (locale === undefined || typeof locale.register !== 'function')
+        return
+    var namespaces = Object.keys(TRANSLATIONS)
+    for (var i = 0; i < namespaces.length; i++) {
+        var ns = namespaces[i]
+        try {
+            locale.register(ns, { ru: TRANSLATIONS[ns] })
+        }
+        catch (err) {
+            var msg = String(err)
+            // A namespace may already carry a Russian dictionary from another
+            // plugin: that is not an error.
+            if (msg.indexOf('already has locale') === -1)
+                console.log('[dsh-local-ru] ' + ns + ': ' + msg)
+        }
+    }
+}
+
+window.__ModuleLoader__.load({
+    id: 'dsh-local-ru',
+    factory(require) {
+        var module = { exports: {} }
+        module.exports = { apply: apply, inject: ['locale'], TRANSLATIONS: TRANSLATIONS }
+        return module.exports
+    },
+})
+""")
+    total = sum(len(entries) for entries in tables.values())
+    print(f"dsh-local-ru: bundle written, {len(tables)} namespaces, {total} keys -> {OUT}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

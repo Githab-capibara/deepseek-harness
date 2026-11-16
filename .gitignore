@@ -6,6 +6,12 @@ apps/desktop/*.p12
 node_modules/
 lib/
 *.tsbuildinfo
+# Local ecosystem plugins ship hand-written source in lib/, which the blanket
+# lib/ rule above would otherwise swallow.
+!ecosystem/plugins/*/lib/**
+!ecosystem/plugins/*/lib/
+# Byte-compiled operator scripts are build residue, not sources.
+ecosystem/scripts/__pycache__/
 pnpm-debug.log
 .pnpm-store/
 .cache/
