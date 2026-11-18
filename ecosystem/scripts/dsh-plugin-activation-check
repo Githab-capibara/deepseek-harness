@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Boot every profile and report which plugin entries failed to activate.
+
+The harness itself reports the entries it could not activate, with the original
+error. This check runs each profile, collects that report, and lists every
+plugin that did not come up.
+"""
+import os
+import re
+import subprocess
+import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+CLI = os.path.join(REPO_ROOT, 'apps', 'cli', 'lib', 'bin.js')
+PROFILES = ['web', 'ultracode', 'dsh-tui', 'decay', 'headless']
+
+# The desktop profile belongs to the Electron carrier, which boots it itself;
+# the CLI refuses that profile by design.
+DESKTOP_OWNED = {'desktop'}
+
+
+def main() -> int:
+    failures = 0
+    for profile in PROFILES:
+        result = subprocess.run(
+            ['node', CLI, '--profile', profile, '--dump-config'],
+            capture_output=True, text=True, timeout=900, cwd=REPO_ROOT,
+        )
+        output = result.stdout + result.stderr
+        if result.returncode != 0:
+            print(f'FAIL {profile}: dsh exited {result.returncode}')
+            failures += 1
+            continue
+        skipped = output.count('skipping profile bundle')
+        inactive = re.search(r'warning: (\d+) entries? did not activate\n(.*?)(?:\n\n|\Z)', output, re.S)
+        patch_warnings = sorted(set(re.findall(r'patch: entry "([^"]+)" not found', output)))
+        if skipped:
+            print(f'FAIL {profile}: {skipped} bundle(s) skipped')
+            failures += 1
+        if inactive is not None:
+            print(f'FAIL {profile}: {inactive.group(1)} entries did not activate')
+            for line in inactive.group(2).splitlines():
+                if line.strip():
+                    print(f'  {line.strip()[:160]}')
+            failures += 1
+        elif patch_warnings:
+            print(f'FAIL {profile}: patch targets missing entries {patch_warnings}')
+            failures += 1
+        else:
+            print(f'OK   {profile}: every entry activated')
+    if failures:
+        print(f'\n{failures} profile(s) failed')
+        return 1
+    print('\nevery profile activated every entry')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

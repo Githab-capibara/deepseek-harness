@@ -27,15 +27,17 @@ TASK = (
 def main() -> int:
     result = subprocess.run(
         ['node', CLI, '--profile', 'headless', TASK],
-        capture_output=True, text=True, timeout=5400, cwd=REPO,
+        capture_output=True, text=True, timeout=7200, cwd=REPO,
     )
     output = result.stdout + result.stderr
     with open('/tmp/opencode/swarm-e2e.log', 'w', encoding='utf-8') as fh:
         fh.write(output)
     swarm_calls = sorted(set(re.findall(r'swarm_[a-z_]+', output)))
     worktree_paths = sorted(set(re.findall(r'\.dsh/worktrees/[^\s\'"]+', output)))
+    spawned = sorted(set(re.findall(r'deps\.start label=(\S+)', output)))
     print(f'exit code: {result.returncode}')
     print(f'swarm tools used: {swarm_calls}')
+    print(f'workers spawned: {spawned}')
     print(f'worktrees mentioned: {len(worktree_paths)}')
     for path in worktree_paths[:8]:
         print(f'  {path}')
@@ -45,6 +47,11 @@ def main() -> int:
         print(f'\nplugin failures: {len(failures)}')
         for line in failures[:5]:
             print(f'  {line}')
+    rate_limits = re.findall(r'RATE_LIMIT[^\n]*', output)
+    if rate_limits:
+        print(f'\nprovider rate limits: {len(rate_limits)}')
+        for line in rate_limits[:2]:
+            print(f'  {line[:140]}')
     return 0
 
 

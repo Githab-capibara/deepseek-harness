@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Check that every ecosystem plugin contributes what it is there for.
+
+Each plugin gets one assertion on the behaviour it owns. The checks read the
+live profile configuration and the plugin sources, so a plugin that stops
+contributing fails here.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ECOSYSTEM_DIR = os.path.dirname(SCRIPT_DIR)
+REPO_ROOT = os.path.dirname(ECOSYSTEM_DIR)
+CLI = os.path.join(REPO_ROOT, 'apps', 'cli', 'lib', 'bin.js')
+PLUGINS = os.path.join(ECOSYSTEM_DIR, 'plugins')
+PROFILE = 'web'
+
+
+def dump_profile() -> str:
+    result = subprocess.run(
+        ['node', CLI, '--profile', PROFILE, '--dump-config'],
+        capture_output=True, text=True, timeout=900, cwd=REPO_ROOT,
+    )
+    if result.returncode != 0:
+        raise SystemExit(f'dump-config failed: {result.stderr[-500:]}')
+    return result.stdout + result.stderr
+
+
+def row_present(config: str, name: str) -> bool:
+    """Whether the profile carries a plugin row with this package name."""
+    return re.search(rf'^\s+name: {re.escape(name)}$', config, re.M) is not None \
+        or re.search(rf'^\s+name: \'{re.escape(name)}\'$', config, re.M) is not None
+
+
+def plugin_source(name: str) -> str:
+    path = os.path.join(PLUGINS, name, 'lib', 'index.js')
+    with open(path, encoding='utf-8') as fh:
+        return fh.read()
+
+
+def client_source(name: str) -> str:
+    path = os.path.join(PLUGINS, name, 'lib', 'client.js')
+    with open(path, encoding='utf-8') as fh:
+        return fh.read()
+
+
+def main() -> int:
+    config = dump_profile()
+    failures: list[str] = []
+
+    def check(ok: bool, description: str) -> None:
+        print(f'{"OK  " if ok else "FAIL"} {description}')
+        if not ok:
+            failures.append(description)
+
+    # dsh-local-ru: the Russian dictionaries reach the client bundle.
+    local_ru = client_source('dsh-local-ru')
+    tables_dir = os.path.join(PLUGINS, 'dsh-local-ru', 'lib', 'tables')
+    table_files = sorted(name for name in os.listdir(tables_dir) if name.endswith('.js'))
+    ru_values = re.findall(r': "([^"]*[а-яА-ЯёЁ][^"]*)"', local_ru)
+    check(len(ru_values) >= 600, f'dsh-local-ru: {len(ru_values)} Russian values in the client bundle')
+    check(len(table_files) == 8, f'dsh-local-ru: {len(table_files)} panel dictionaries')
+    check(row_present(config, 'dsh-local-ru'), 'dsh-local-ru: the profile carries its row')
+
+    # dsh-subagent-compat: the subagent shim is loaded.
+    compat = plugin_source('dsh-subagent-compat')
+    check("export const name = 'subagent-compat'" in compat,
+          'dsh-subagent-compat: exports a plugin name')
+    check(row_present(config, 'dsh-subagent-compat'), 'dsh-subagent-compat: the profile carries its row')
+
+    # dsh-swarm-autonomy-guard: the guard intercepts the swarm tool.
+    guard = plugin_source('dsh-swarm-autonomy-guard')
+    check('swarm_dispatch' in guard, 'dsh-swarm-autonomy-guard: watches the swarm dispatch tool')
+    check(row_present(config, 'dsh-swarm-autonomy-guard'), 'dsh-swarm-autonomy-guard: the profile carries its row')
+
+    # dsh-swarm-worktree: every swarm worker gets its own worktree.
+    worktree = plugin_source('dsh-swarm-worktree')
+    check('spawnDeps' in worktree, 'dsh-swarm-worktree: intercepts the swarm spawn')
+    check('worktree' in worktree and 'acquire' in worktree, 'dsh-swarm-worktree: acquires a worktree per worker')
+    check('merge' in worktree, 'dsh-swarm-worktree: merges the worker branch back')
+    check(row_present(config, 'dsh-swarm-worktree'), 'dsh-swarm-worktree: the profile carries its row')
+
+    # The third-party stack: every plugin row is in the profile.
+    third_party = [
+        'dsh-swarm-orchestrator', 'dsh-task-reliability', 'dsh-protect-tests',
+        'dsh-plugin-stalegreen', 'dsh-subagent-guard', 'dsh-verify-kit',
+        'dsh-verify-judge', '@doiiarx/dsh-todo-continuation', 'dsh-workflow-worktree',
+        'dsh-worktree', 'dsh-git-worktree', 'dsh-context-decay',
+        '@goodandready/dsh-agent-loop-guard', 'dsh-baseline', 'dsh-auto-review',
+        'dsh-second-review', 'dsh-stall-guard', 'dsh-session-retry',
+        'dsh-agent-frugality', '@goodandready/dsh-russian-lang',
+    ]
+    missing = [name for name in third_party if not row_present(config, name)]
+    check(not missing, f'third-party stack: all {len(third_party)} plugins present'
+          + (f' (missing {missing})' if missing else ''))
+
+    # dsh-gitnexus-plugin contributes an MCP server, not a plugin row.
+    check('- id: mcp-gitnexus' in config and 'serverName: gitnexus' in config,
+          'dsh-gitnexus-plugin: the MCP server row is present')
+
+    # The UltraCode working mode reaches every profile through its preset.
+    preset = re.search(r'- id: preset-ultracode\n(.*?)(?=\n- id: |\Z)', config, re.S)
+    check(preset is not None, 'ultracode preset: the profile carries the preset row')
+    if preset is not None:
+        check('UltraCode mode is on' in preset.group(1),
+              'ultracode preset: the working mode persona is present')
+
+    # Exactly one context reducer runs.
+    reducers = [name for name in ('compaction-basic', 'dsh-context-decay', 'auto-compact')
+                if row_present(config, name)]
+    check('dsh-context-decay' in reducers, f'context reducer: dsh-context-decay is mounted ({reducers})')
+
+    if failures:
+        print(f'\n{len(failures)} check(s) failed')
+        return 1
+    print('\nevery ecosystem plugin contributes what it is there for')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -104,6 +104,14 @@ def main() -> int:
          ('const listenCtx = ctx.root ?? ctx;', 'const listenCtx = ctx[Context.root] ?? ctx;')],
         'dsh-task-reliability@0.4.11.patch',
     )
+    patch_source(
+        '@deepseek-harness-tui/dsh-tui', 'cordis.patch.yml',
+        # This runtime ships neither tool, so the rows that switch them off
+        # target entries that do not exist and the harness warns on every boot.
+        [('- id: tool-ralph\n  disabled: true\n\n', ''),
+         ('- id: tool-subagent-list-agents\n  disabled: true\n', '')],
+        '@deepseek-harness-tui__dsh-tui@0.20.1.patch',
+    )
     return 0
 
 

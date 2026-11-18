@@ -1,0 +1,23 @@
+diff --git a/cordis.patch.yml b/cordis.patch.yml
+index e04173a..d95ddd4 100644
+--- a/cordis.patch.yml
++++ b/cordis.patch.yml
+@@ -130,9 +130,6 @@
+ - id: tool-pwsh
+   disabled: true
+ 
+-- id: tool-ralph
+-  disabled: true
+-
+ - id: tool-result-pruner
+   disabled: true
+ 
+@@ -157,8 +154,6 @@
+ - id: tool-subagent-fork
+   disabled: true
+ 
+-- id: tool-subagent-list-agents
+-  disabled: true
+ 
+ - id: tool-todo
+   disabled: true
