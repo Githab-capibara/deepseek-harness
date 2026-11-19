@@ -20,13 +20,16 @@ PLUGIN_DIR = os.path.join(
 
 
 def journal_url() -> str:
+    # The URL is printed once at startup, so the window must outlive the
+    # run: a long-lived service logs far more than 300 lines an hour and
+    # the token would scroll out of a fixed-count tail.
     out = subprocess.run(
-        ['journalctl', '--user', '-u', 'dsh-web.service', '--no-pager', '-n', '300'],
+        ['journalctl', '--user', '-u', 'dsh-web.service', '--no-pager', '-n', '5000'],
         capture_output=True, text=True, timeout=60,
     ).stdout
     matches = re.findall(r'http://127\.0\.0\.1:3080/\?token=([A-Za-z0-9_-]+)', out)
     if not matches:
-        raise SystemExit('no web URL in the service journal')
+        raise SystemExit('no web URL in the service journal — is dsh-web.service running?')
     return matches[-1]
 
 
