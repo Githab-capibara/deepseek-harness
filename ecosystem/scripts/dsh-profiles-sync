@@ -55,9 +55,15 @@ def local_runtime() -> dict[str, str]:
     with an older one and crashes the host on startup. `link:` in
     `pnpm.overrides` only applies to DIRECT dependencies, so the runtime
     packages are listed as direct ones.
+
+    The vendored Cordis foundations travel with them: a plugin that imports
+    `@deepseek-ai/schemastery` or `@deepseek-ai/cosmokit` needs the fork's
+    copy, and an override alone does not place one in the profile.
     """
     linked = {}
     for name, relative in RUNTIME_PACKAGES.items():
+        linked[name] = "link:" + os.path.join(REPO_ROOT, relative)
+    for name, relative in VENDOR_PACKAGES.items():
         linked[name] = "link:" + os.path.join(REPO_ROOT, relative)
     return linked
 
@@ -222,6 +228,15 @@ def build_patch(spec, store, name):
     return text
 
 
+# The vendored Cordis foundations a plugin may import directly. The profile
+# needs its own copy: the host resolves them from its installation, a plugin
+# resolves them from the profile.
+VENDOR_PACKAGES = {
+    "@deepseek-ai/cosmokit": "vendor/cosmokit",
+    "@deepseek-ai/cordis": "vendor/cordis",
+    "@deepseek-ai/schemastery": "vendor/schemastery",
+}
+
 # The runtime packages the profile's plugins peer-depend on. The fork owns
 # them: a plugin that pulls the npm copy would shadow the fork's runtime with
 # an older one (the npm release has no `FiberState` runtime export), and the
@@ -258,8 +273,16 @@ PROFILE_PATCHES = {
     "dsh-verify-judge@0.2.0": "dsh-verify-judge@0.2.0.patch",
 }
 
+# The TUI bundle switches off tools this runtime does not ship, so its rows
+# target entries that do not exist. The patch applies only to the profiles that
+# boot the TUI, because pnpm rejects a patch for a package a profile does not
+# install.
+TUI_PATCHES = {
+    "@deepseek-harness-tui/dsh-tui@0.20.1": "@deepseek-harness-tui__dsh-tui@0.20.1.patch",
+}
 
-def build_workspace_yaml() -> str:
+
+def build_workspace_yaml(name: str) -> str:
     """The profile's pnpm workspace: runtime packages linked to the fork."""
     lines = [
         "packages:",
@@ -275,14 +298,17 @@ def build_workspace_yaml() -> str:
         "# copy shadows the fork's runtime with an older release.",
         "overrides:",
     ]
-    for name, relative in sorted(RUNTIME_PACKAGES.items()):
-        lines.append(f"  '{name}': 'link:{os.path.join(REPO_ROOT, relative)}'")
-    lines.append("  '@deepseek-ai/cosmokit': 'link:%s'" % os.path.join(REPO_ROOT, "vendor", "cosmokit"))
-    lines.append("  '@deepseek-ai/schemastery': 'link:%s'" % os.path.join(REPO_ROOT, "vendor", "schemastery"))
+    for package, relative in sorted(RUNTIME_PACKAGES.items()):
+        lines.append(f"  '{package}': 'link:{os.path.join(REPO_ROOT, relative)}'")
+    for package, relative in sorted(VENDOR_PACKAGES.items()):
+        lines.append(f"  '{package}': 'link:{os.path.join(REPO_ROOT, relative)}'")
     lines.append("")
     lines.append("# Third-party plugins that still call APIs this runtime removed.")
     lines.append("patchedDependencies:")
-    for package, patch in sorted(PROFILE_PATCHES.items()):
+    patches = dict(PROFILE_PATCHES)
+    if PROFILES_SPEC[name]["app"] == "@deepseek-harness-tui/dsh-tui":
+        patches.update(TUI_PATCHES)
+    for package, patch in sorted(patches.items()):
         lines.append(f"  '{package}': patches/{patch}")
     return "\n".join(lines) + "\n"
 
@@ -295,7 +321,7 @@ def copy_profile_files(name):
     workspace = os.path.join(directory, "pnpm-workspace.yaml")
     tmp = workspace + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(build_workspace_yaml())
+        fh.write(build_workspace_yaml(name))
     os.replace(tmp, workspace)
     for filename in ("compatibility.json",):
         source = os.path.join(TEMPLATE, filename)

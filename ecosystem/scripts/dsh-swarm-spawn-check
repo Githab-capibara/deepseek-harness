@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Reproduce the swarm task-agent spawn against the real profile runtime.
+
+The swarm spawns a task agent through the legacy `subagents.start()` call. The
+local compatibility plugin forwards it to the 0.2.x activation API, which
+checks the spawning agent against the live agent registry. This runs that path
+against the profile's own packages and reports what the activation spec
+received.
+"""
+import json
+import os
+import subprocess
+import sys
+
+PROFILE_MODULES = os.path.join(
+    os.environ.get('DSH_HOME', '/home/d/.dsh'), 'profiles', 'headless', 'node_modules',
+)
+COMPAT = os.path.join(PROFILE_MODULES, 'dsh-subagent-compat', 'lib', 'index.js')
+
+SOURCE = '''
+import { Context } from '@deepseek-ai/cordis'
+import { apply } from 'file://%(compat)s'
+
+const ctx = new Context()
+let seen
+const subagents = {
+  startActivation: async (spec) => {
+    seen = spec
+    return { childId: 'child-1', result: { ok: true }, dispose: () => {} }
+  },
+}
+ctx.provide('subagents', subagents)
+apply(ctx, {})
+const parent = { id: 'parent-1', session: { header: { cwd: '/tmp' } } }
+await subagents.start('spawn', {
+  label: 'swarm:a-module',
+  prompt: [{ type: 'text', text: 'do the work' }],
+  parent,
+  signal: new AbortController().signal,
+})
+console.log(JSON.stringify({
+  hasParent: seen.parent !== undefined,
+  parentId: seen.parent?.id,
+  provider: seen.provider,
+  delivery: seen.delivery,
+  requestKeys: Object.keys(seen.request ?? {}).sort(),
+}))
+'''
+
+
+def main() -> int:
+    if not os.path.exists(COMPAT):
+        print(f'FAIL: the compatibility plugin is not installed at {COMPAT}')
+        return 1
+    result = subprocess.run(
+        ['node', '--input-type=module', '-e', SOURCE % {'compat': COMPAT}],
+        capture_output=True, text=True, timeout=300, cwd=PROFILE_MODULES,
+    )
+    if result.returncode != 0:
+        print('FAIL: the spawn path threw')
+        print(result.stderr.strip()[:600])
+        return 1
+    facts = json.loads(result.stdout.strip().splitlines()[-1])
+    failures = 0
+    if facts.get('parentId') != 'parent-1':
+        print(f"FAIL: the activation spec carries no spawning agent ({facts})")
+        failures += 1
+    else:
+        print('OK   the activation spec carries the spawning agent')
+    if facts.get('provider') != 'spawn' or facts.get('delivery') != 'parent':
+        print(f'FAIL: the activation spec names the wrong provider or delivery ({facts})')
+        failures += 1
+    else:
+        print('OK   the activation spec names the provider and the delivery')
+    if 'parent' in facts.get('requestKeys', []):
+        print('FAIL: the spawning agent is duplicated inside the provider request')
+        failures += 1
+    else:
+        print('OK   the provider request carries no duplicated parent')
+    return 1 if failures else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

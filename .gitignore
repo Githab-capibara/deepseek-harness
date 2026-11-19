@@ -53,6 +53,10 @@ apps/cli/docs/
 .worktrees/
 worktrees/
 .agents/worktrees/
+# Run residue of the operator swarm checks: the repository a swarm task drives
+# and the swarm store it leaves behind.
+ecosystem-check/
+.dsh-swarm/
 .typert-*/
 native/system/test/bin/
 

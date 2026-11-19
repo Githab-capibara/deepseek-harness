@@ -347,6 +347,47 @@ export function apply(ctx, config) {
         return `merged ${commits} commit(s) into ${target}`;
     };
 
+    /**
+     * Release the worktree a closed task used, and its branch when target holds it.
+     *
+     * `ctx.worktree.acquire` allocates a checkout and a branch and removes
+     * neither on its own, so without this step every task of every run leaves
+     * one directory under `.dsh/worktrees/` and one branch behind. The branch
+     * survives when `target` does not contain it: a conflicting merge leaves
+     * the branch for manual resolution, and a run that failed before its tasks
+     * were accepted may hold finished work that was never merged.
+     * @param {any} record - the worktree record of the closed task.
+     * @param {string} target - the branch the work merged into.
+     * @returns {Promise<string>} what happened, for the operator log.
+     */
+    const releaseWorktree = async (record, target) => {
+        const { repoRoot, branch } = record;
+        const path = record.facts?.path;
+        // The repository root is never a lease target; the guard keeps a
+        // malformed record from removing the checkout the run works in.
+        if (typeof path !== 'string' || path === repoRoot)
+            return 'refused: record has no worktree path';
+        // Confirm the checkout is a registered worktree of this repository
+        // before touching the filesystem, so a stale record removes nothing.
+        const listed = await git(repoRoot, ['worktree', 'list', '--porcelain']);
+        const registered = listed.split('\n').some((line) => line.startsWith('worktree ')
+            && line.slice('worktree '.length).trim() === path);
+        if (!registered)
+            return 'already released';
+        // `git branch --merged` prints the branch only when target reaches it;
+        // the empty-output-on-failure contract of the git helper cannot tell an
+        // exit-1 `merge-base --is-ancestor` from success.
+        const held = await git(repoRoot, ['branch', '--merged', target, '--list', branch]);
+        const merged = held.split('\n').some((line) => line.trim().replace(/^[*+] /, '') === branch);
+        // A worker leaves untracked residue (build output, `node_modules`), so
+        // `git worktree remove` refuses the checkout without a force.
+        await git(repoRoot, ['worktree', 'remove', '--force', '--', path]);
+        if (!merged)
+            return `worktree removed; branch ${branch} kept (not contained by ${target})`;
+        await git(repoRoot, ['branch', '-D', branch]);
+        return 'worktree and branch released';
+    };
+
     // ── 3. Lifecycle wiring ─────────────────────────────────────────────
     ctx.on('agent/created', ({ agent }) => {
         const id = agent?.id ?? agent?.session?.header?.id;
@@ -364,11 +405,12 @@ export function apply(ctx, config) {
         debug(`worker ${id} runs in ${record.facts.path}`);
     });
 
-    if (ctx.get('subagents') !== undefined) {
-        // The subagents service is only needed to resolve the workspace of a
-        // request; the spawn interception happens on the swarm service.
-        return;
-    }
+    // No subagents guard here: `withWorktree` resolves the working directory
+    // from the spawn request (its own `cwd`, else the parent session's), and
+    // the wiring below only touches the swarm service and its event store. A
+    // `ctx.get('subagents')` check used to return early whenever the service
+    // was visible, which silently disabled the merge and the release in every
+    // host that exposes it.
 
     // The swarm service owns the task lifecycle; the merge happens when the
     // orchestrator accepts a task. The event store is the single source of
@@ -536,6 +578,49 @@ export function apply(ctx, config) {
             void onTaskEvent(event);
         });
         /**
+         * Report the leases a finished run left behind.
+         *
+         * A run can close while its tasks were never accepted — the provider
+         * outage takes every worker down, for instance. Those branches may
+         * hold committed work that was never merged, so nothing is removed
+         * here: the leftover worktree and branch are reported instead, because
+         * silently discarding finished work is worse than visible residue.
+         * @param {any} event - the swarm run event.
+         */
+        const onRunEvent = async (event) => {
+            if (event?.kind !== 'run/completed' && event?.kind !== 'run/failed' && event?.kind !== 'run/aborted')
+                return;
+            const runId = event?.runId;
+            if (typeof runId !== 'string')
+                return;
+            let state;
+            try {
+                state = swarm.view();
+            }
+            catch {
+                return;
+            }
+            const run = state?.runs?.get(runId);
+            const cwd = run?.dispatch?.cwd;
+            if (typeof cwd !== 'string')
+                return;
+            const repoRoot = await repoRootOf(cwd);
+            if (repoRoot === undefined)
+                return;
+            const byRepo = leasesByRepo.get(repoRoot);
+            if (byRepo === undefined)
+                return;
+            for (const record of byRepo.values()) {
+                if (record.released !== undefined || record.merged === true)
+                    continue;
+                console.log(`[swarm-worktree] run ${runId} (${event.kind}) left worktree ${record.facts.path} on branch ${record.branch}; `
+                    + 'inspect it — its work was never merged, so it is kept, not removed');
+            }
+        };
+        store.subscribe((event) => {
+            void onRunEvent(event);
+        });
+        /**
          * Handle an accepted swarm task: merge its branch into main.
          * @param {any} event - the swarm event.
          */
@@ -600,11 +685,17 @@ export function apply(ctx, config) {
             const commits = await git(record.facts.path, ['rev-list', '--count', `${runInfo.target}..${record.branch}`]);
             if (commits === '' || commits === '0') {
                 console.log(`[swarm-worktree] task ${taskId} of ${runId}: worker committed nothing — task failed`);
+                record.released = await releaseWorktree(record, runInfo.target);
+                console.log(`[swarm-worktree] task ${taskId} of ${runId}: ${record.released}`);
                 await failTask(swarm, runId, taskId);
                 return;
             }
             const report = await mergeBranch(record, runInfo.target);
             console.log(`[swarm-worktree] task ${taskId} of ${runId}: ${report}`);
+            if (record.released === undefined) {
+                record.released = await releaseWorktree(record, runInfo.target);
+                console.log(`[swarm-worktree] task ${taskId} of ${runId}: ${record.released}`);
+            }
         };
     };
 

@@ -22,11 +22,13 @@ TASK = (
     'проверяет все три функции. Это задача из трёх независимых подсистем, '
     'каждая требует своей реализации и своей проверки.'
 )
+MODEL = os.environ.get('DSH_TEST_MODEL', 'hnc/MiniMax-M3.1-Flash')
+MODEL_PATCH = os.path.join(REPO, 'ecosystem', 'ecosystem-check-model.yml')
 
 
 def main() -> int:
     result = subprocess.run(
-        ['node', CLI, '--profile', 'headless', TASK],
+        ['node', CLI, '--profile', 'headless', '--patch', MODEL_PATCH, TASK],
         capture_output=True, text=True, timeout=7200, cwd=REPO,
     )
     output = result.stdout + result.stderr
@@ -36,6 +38,7 @@ def main() -> int:
     worktree_paths = sorted(set(re.findall(r'\.dsh/worktrees/[^\s\'"]+', output)))
     spawned = sorted(set(re.findall(r'deps\.start label=(\S+)', output)))
     print(f'exit code: {result.returncode}')
+    print(f'model: {MODEL}')
     print(f'swarm tools used: {swarm_calls}')
     print(f'workers spawned: {spawned}')
     print(f'worktrees mentioned: {len(worktree_paths)}')

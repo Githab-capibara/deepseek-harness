@@ -35,6 +35,8 @@ def ask(base_url: str, api_key: str, model: str, prompt: str) -> str:
             payload = json.loads(response.read().decode('utf-8'))
     except urllib.error.HTTPError as error:
         return f'HTTP {error.code}: {error.read().decode("utf-8")[:200]}'
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        return f'network: {type(error).__name__}: {error}'
     choices = payload.get('choices') or []
     if not choices:
         return f'no choices: {json.dumps(payload)[:200]}'
@@ -49,24 +51,27 @@ def ask(base_url: str, api_key: str, model: str, prompt: str) -> str:
 
 def main() -> int:
     prompt = ' '.join(sys.argv[1:]) or 'Ответь одним словом: работает?'
+    # The harness routes every model through the `hnc/` prefix: the profile
+    # names one provider per model family, and the prefix selects the channel
+    # inside the gateway.
     providers = [
-        ('omniroute', 'http://localhost:20128/v1', 'OMNIROUTE_API_KEY'),
-        ('hnc', 'https://api.hcnsec.cn/v1', 'HNC_API_KEY'),
-        ('freellmapi', 'http://localhost:8080/v1', 'FREELLMAPI_API_KEY'),
+        ('omniroute', 'http://localhost:20128/v1', 'OMNIROUTE_API_KEY', 'hnc/step-5-preview'),
+        ('hnc', 'https://api.hcnsec.cn/v1', 'HNC_API_KEY', 'step-5-preview'),
+        ('freellmapi', 'http://localhost:8080/v1', 'FREELLMAPI_API_KEY', 'step-5-preview'),
     ]
     failures = 0
-    for name, base_url, key_name in providers:
+    for name, base_url, key_name, model in providers:
         try:
             key = env_value(key_name)
         except SystemExit as error:
             print(f'{name}: skipped ({error})')
             continue
-        answer = ask(base_url, key, MODEL, prompt)
-        if answer.startswith('HTTP') or answer.startswith('no choices'):
-            print(f'{name}/{MODEL}: FAILED — {answer[:160]}')
+        answer = ask(base_url, key, model, prompt)
+        if answer.startswith(('HTTP', 'network:', 'no choices', 'no answer')):
+            print(f'{name}/{model}: FAILED — {answer[:160]}')
             failures += 1
         else:
-            print(f'{name}/{MODEL}: OK — {answer[:120]}')
+            print(f'{name}/{model}: OK — {answer[:120]}')
     return 1 if failures else 0
 
 

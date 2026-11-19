@@ -28,6 +28,12 @@
  *    contract has no persona field any more (it is only carried by the persisted
  *    subagent descriptor).
  *
+ *    The spawning agent, the prompt and the working directory travel as the
+ *    spec's own fields: the 0.2.x service checks the parent against the live
+ *    agent registry and iterates the prompt, so a spec that keeps them inside
+ *    a nested provider request fails with "Cannot read properties of undefined
+ *    (reading 'id')" or "prompt is not iterable".
+ *
  * 2. Stale swarm event-store ownership markers
  *
  *    dsh-swarm-orchestrator owns its event store with an EXCLUSIVE and NEVER
@@ -158,16 +164,24 @@ function apply(ctx) {
         if (typeof subagents.startActivation !== 'function')
             return false;
         subagents.start = async (providerName, request) => {
-            const { label, prompt, persona, toolFilter, signal, ...rest } = request ?? {};
+            const { label, prompt, persona, signal, ...rest } = request ?? {};
             const composedPrompt = typeof persona === 'string' && persona.length > 0
                 ? withPersona(prompt, persona)
                 : prompt;
+            // `startActivation` reads `parent`, `prompt` and `cwd` from the spec
+            // itself, not from a nested provider request: a spec without them
+            // fails the live-parent check ("Cannot read properties of undefined
+            // (reading 'id')") or the prompt check ("prompt is not iterable").
+            const { parent, cwd, ...providerRequest } = rest;
             const receipt = await subagents.startActivation({
                 provider: providerName,
                 ...(label === undefined ? {} : { label }),
-                request: { ...rest, ...(composedPrompt === undefined ? {} : { prompt: composedPrompt }) },
+                ...(parent === undefined ? {} : { parent }),
+                ...(cwd === undefined ? {} : { cwd }),
+                ...(composedPrompt === undefined ? {} : { prompt: composedPrompt }),
                 ...(signal === undefined ? {} : { signal }),
                 delivery: 'parent',
+                ...(Object.keys(providerRequest).length > 0 ? { request: providerRequest } : {}),
             });
             return {
                 id: receipt.childId,

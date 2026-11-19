@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Prove the swarm worktree cycle on a real repository.
+"""Drive the swarm worktree plugin end to end and report what it did.
 
-The plugin gives every swarm worker its own worktree and merges the worker's
-commit back into the main branch when the task is accepted. This drives that
-cycle without a model provider: it creates a temporary repository, runs the
-plugin's worktree helpers against it, commits inside the worktree, and checks
-that the main branch received the commit.
+The plugin intercepts the swarm service's spawn, gives each worker its own
+worktree, merges the worker's commit back into the target branch when the task
+is accepted, and releases the worktree afterwards. This drives that whole cycle
+against a temporary repository and a stand-in swarm service: a worker that
+writes and commits, the acceptance event, the merge, and the release.
 """
 import json
 import os
@@ -19,6 +19,111 @@ PLUGIN = os.path.join(
     'ecosystem', 'plugins', 'dsh-swarm-worktree', 'lib', 'index.js',
 )
 
+RUN_ID = 'run-check'
+
+# The stand-in swarm service and worktree service the plugin is driven with.
+# They mirror the contracts the real services expose: the worktree service's
+# acquire returns an entry with a path and a branch; the swarm service answers
+# spawnDeps(), view() and an event store that notifies its subscribers.
+DRIVER = r'''
+import { execFile } from 'node:child_process'
+import { existsSync, writeFileSync } from 'node:fs'
+import { promisify } from 'node:util'
+import { apply } from 'file://PLUGIN_PATH'
+
+const execFileAsync = promisify(execFile)
+const git = async (cwd, args) => {
+  const { stdout } = await execFileAsync('git', args, { cwd, timeout: 120000 })
+  return stdout.trim()
+}
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+export async function drive(repo, log) {
+  // The worktree service: a real checkout on a real branch, like the host's.
+  const worktreeService = {
+    async acquire(slug, repoRoot) {
+      const path = `${repoRoot}/.dsh/worktrees/${slug}`
+      await git(repoRoot, ['worktree', 'add', '-b', `worktree-${slug}`, path])
+      return { entry: { path, branch: `worktree-${slug}` } }
+    },
+  }
+  // The event store: append notifies every subscriber, like the swarm's own.
+  const listeners = []
+  // The real swarm service is a class instance: the plugin patches the
+  // prototype to reach every instance, so the stand-in must be a class too.
+  class SwarmStub {
+    spawnDeps() {
+      return {
+        start: async (request) => {
+          swarm.spawned.push(request)
+          return { id: 'child-' + request.label, result: {}, dispose: () => {} }
+        },
+      }
+    }
+  }
+  const swarm = new SwarmStub()
+  swarm.spawned = []
+  swarm.tasks = new Map()
+  swarm.view = () => ({ runs: new Map([[RUN_ID, { dispatch: { cwd: repo } }]]), tasks: new Map([...swarm.tasks]) })
+  swarm.events = {
+    subscribe(listener) { listeners.push(listener) },
+    append(kind, event) { for (const listener of listeners) listener({ kind, ...event }) },
+  }
+  swarm.checkEvidence = async (task) => ({ ok: true })
+  swarm.scheduleTick = () => {}
+  const ctx = {
+    logger: () => ({ info: () => {}, warn: () => {}, error: () => {} }),
+    get: (key) => (key === 'worktree' ? worktreeService : key === 'swarm' ? swarm : undefined),
+    on: () => {},
+    inject: (keys, callback) => { callback(ctx) },
+    scope: () => undefined,
+  }
+  // The plugin reports its work on the console; the capture stays installed
+  // for the whole driven cycle, because the merge and the release run after
+  // `apply` returned.
+  const realLog = console.log
+  console.log = (...args) => { log.push(args.map(String).join(' ')) }
+  apply(ctx, {})
+  return swarm
+}
+
+export async function spawnWorker(repo, log, taskId, commit) {
+  const swarm = await drive(repo, log)
+  const request = {
+    label: `swarm:${taskId}`,
+    prompt: [{ type: 'text', text: 'do the work' }],
+    parent: { session: { header: { cwd: repo } } },
+  }
+  const deps = swarm.spawnDeps()
+  const started = await deps.start(request)
+  // The worker writes and commits inside the worktree it was given. The
+  // commit is part of the driven cycle, because the merge reads the branch
+  // only the worker can advance.
+  if (commit === true) {
+    // The rewritten request carries the worktree directory: the fake spawn
+    // records every request it was called with.
+    const cwd = swarm.spawned[swarm.spawned.length - 1]?.cwd
+    if (typeof cwd !== 'string') throw new Error('the worker received no working directory');
+    writeFileSync(`${cwd}/worker.txt`, 'worker output\n')
+    await git(cwd, ['add', 'worker.txt'])
+    await git(cwd, ['commit', '-qm', 'worker output'])
+  }
+  return { swarm, started, request, cwd: swarm.spawned[swarm.spawned.length - 1]?.cwd }
+}
+
+export async function settle(swarm, taskId, taskStatus) {
+  if (taskStatus !== undefined) {
+    swarm.tasks.set(`${RUN_ID}/${taskId}`, { id: taskId, status: taskStatus })
+    swarm.events.append('task/completed', { runId: RUN_ID, taskId })
+  } else {
+    swarm.events.append('run/failed', { runId: RUN_ID })
+  }
+  // The merge, the failure and the release are asynchronous: give them time
+  // before the driver reports the plugin's log.
+  await sleep(2000)
+}
+'''.replace('RUN_ID', f"'{RUN_ID}'")
+
 
 def git(cwd: str, *args: str) -> str:
     result = subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True, timeout=120)
@@ -27,11 +132,22 @@ def git(cwd: str, *args: str) -> str:
     return result.stdout.strip()
 
 
+def node(script: str, timeout: int = 600) -> dict:
+    result = subprocess.run(
+        ['node', '--input-type=module', '-e', script],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise SystemExit(f'node failed: {result.stderr.strip()[:600]}')
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
 def main() -> int:
     if not os.path.exists(PLUGIN):
         print(f'FAIL: plugin not found at {PLUGIN}')
         return 1
-    work = tempfile.mkdtemp(prefix='dsh-swarm-worktree-check-')
+    driver = DRIVER.replace('PLUGIN_PATH', PLUGIN)
+    work = tempfile.mkdtemp(prefix='dsh-worktree-cycle-')
     try:
         repo = os.path.join(work, 'repo')
         os.makedirs(repo)
@@ -43,57 +159,116 @@ def main() -> int:
         git(repo, 'add', 'README.md')
         git(repo, 'commit', '-qm', 'base')
 
-        # The plugin's own helpers: the slug names the branch and the directory.
-        probe = subprocess.run(
-            ['node', '--input-type=module', '-e', f'''
-import {{ worktreeSlug, repoRootOf, currentBranch }} from 'file://{PLUGIN}'
-const slug = worktreeSlug('task-1', 'x')
-const root = await repoRootOf({json.dumps(repo)})
-const branch = await currentBranch({json.dumps(repo)})
-console.log(JSON.stringify({{ slug, root, branch }}))
-'''],
-            capture_output=True, text=True, timeout=300,
-        )
-        if probe.returncode != 0:
-            print(f'FAIL: plugin helpers failed: {probe.stderr.strip()[:300]}')
+        slug = node(f'''
+import {{ worktreeSlug }} from 'file://{PLUGIN}'
+process.stdout.write(JSON.stringify({{ slug: worktreeSlug('task-7', 'x') }}))
+process.stdout.write(String.fromCharCode(10))
+''')['slug']
+        if 'task-7' not in slug:
+            print(f'FAIL: the slug does not carry the task id: {slug}')
             return 1
-        facts = json.loads(probe.stdout.strip().splitlines()[-1])
-        slug = facts['slug']
-        if facts['root'] != os.path.realpath(repo):
-            print(f"FAIL: repoRootOf returned {facts['root']}")
-            return 1
-        if facts['branch'] != 'main':
-            print(f"FAIL: currentBranch returned {facts['branch']}")
-            return 1
-        if 'task-1' not in slug:
-            print(f'FAIL: slug does not carry the task id: {slug}')
-            return 1
+        print(f'OK   helpers: slug={slug}')
 
-        # The cycle the plugin drives: a worktree branch, a commit inside it, and
-        # a merge back into the main branch.
-        worktree = os.path.join(repo, '.dsh', 'worktrees', slug)
-        branch = f'worktree-swarm-{slug}'
-        os.makedirs(os.path.dirname(worktree), exist_ok=True)
-        git(repo, 'worktree', 'add', '-q', '-b', branch, worktree)
-        with open(os.path.join(worktree, 'worker.txt'), 'w', encoding='utf-8') as fh:
-            fh.write('worker output\n')
-        git(worktree, 'add', 'worker.txt')
-        git(worktree, 'commit', '-qm', 'worker output')
-        merge = subprocess.run(
-            ['git', 'merge', '--no-ff', '--no-edit', branch],
-            cwd=repo, capture_output=True, text=True, timeout=120,
-        )
-        if merge.returncode != 0:
-            print(f'FAIL: merge failed: {merge.stderr.strip()}')
+        worktree = os.path.join(repo, '.dsh', 'worktrees', 'swarm-a-module-x')
+        branch = 'worktree-swarm-a-module-x'
+
+        # The driven cycle: apply the plugin, spawn a worker into a worktree,
+        # let it commit, accept its task, then observe the merge and release.
+        # The whole cycle runs inside one driver process: a second process
+        # would ask the temporary repository for the same branch again.
+        cycle = node(f'''
+{driver}
+const log = []
+const spawned = await spawnWorker(REPO, log, 'a-module', true)
+const worktreeExisted = existsSync(PATH)
+await settle(spawned.swarm, 'a-module', 'completed')
+process.stdout.write(JSON.stringify({{
+  spawnedLabels: spawned.swarm.spawned.map((r) => r.label),
+  childCwd: spawned.cwd,
+  worktreeExisted,
+  log,
+}}))
+process.stdout.write(String.fromCharCode(10))
+'''.replace('REPO', f'"{repo}"').replace('PATH', f'"{worktree}"'))
+
+        if cycle['spawnedLabels'] != ['swarm:a-module']:
+            print(f'FAIL: the spawn was not intercepted: {cycle["spawnedLabels"]}')
+            return 1
+        print('OK   the swarm spawn was intercepted for the worker')
+        if cycle['childCwd'] != worktree:
+            print(f'FAIL: the worker started in {cycle["childCwd"]}, expected {worktree}')
+            return 1
+        if not cycle['worktreeExisted']:
+            print('FAIL: no worktree directory was created')
+            return 1
+        print(f'OK   the worker runs in its own worktree: {os.path.basename(worktree)}')
+        print('OK   the worker committed inside its worktree')
+
+        merge_log = ' | '.join(cycle.get('log', []))
+        if 'merged' not in merge_log:
+            print(f'FAIL: the merge did not run: {merge_log[:300]}')
             return 1
         if not os.path.exists(os.path.join(repo, 'worker.txt')):
-            print('FAIL: the main branch did not receive the worker output')
+            print('FAIL: the target branch did not receive the worker output')
             return 1
-        log = git(repo, 'log', '--oneline', '-3')
-        if 'worker output' not in log:
-            print(f'FAIL: the merge commit is missing from the log: {log}')
+        print('OK   the worker commit was merged into main')
+
+        # The release: the worktree directory and the merged branch are gone.
+        if os.path.exists(worktree):
+            print(f'FAIL: the merged worktree was not released: {worktree}')
             return 1
-        print(f'OK: worktree slug {slug}, branch {branch}, worker commit merged into main')
+        if git(repo, 'branch', '--list', branch) != '':
+            print(f'FAIL: the merged branch was not deleted: {branch}')
+            return 1
+        print('OK   the merged worktree and its branch were released')
+
+        # An empty worker: the task is failed and its worktree is released.
+        empty = node(f'''
+{driver}
+const log = []
+const spawned = await spawnWorker(REPO, log, 'b-module', false)
+await settle(spawned.swarm, 'b-module', 'completed')
+process.stdout.write(JSON.stringify({{ log }}))
+process.stdout.write(String.fromCharCode(10))
+'''.replace('REPO', f'"{repo}"'))
+        empty_log = ' | '.join(empty.get('log', []))
+        empty_dir = os.path.join(repo, '.dsh', 'worktrees', 'swarm-b-module-x')
+        if os.path.exists(empty_dir):
+            print(f'FAIL: the empty worker worktree was not released: {empty_dir}')
+            return 1
+        if 'worktree-swarm-b-module-x' in git(repo, 'branch'):
+            print('FAIL: the empty worker branch was not deleted')
+            return 1
+        if 'worker committed nothing' not in empty_log:
+            print(f'FAIL: the empty task was not failed: {empty_log[:300]}')
+            return 1
+        print('OK   an empty worker failed its task and its worktree was released')
+
+        # A run that ends with work never accepted: the worktree is KEPT and
+        # reported, because its branch may hold finished, unmerged work.
+        stranded = node(f'''
+{driver}
+const log = []
+const spawned = await spawnWorker(REPO, log, 'c-module', false)
+await settle(spawned.swarm, 'c-module', undefined)
+process.stdout.write(JSON.stringify({{ log }}))
+process.stdout.write(String.fromCharCode(10))
+'''.replace('REPO', f'"{repo}"'))
+        stranded_log = ' | '.join(stranded.get('log', []))
+        stranded_dir = os.path.join(repo, '.dsh', 'worktrees', 'swarm-c-module-x')
+        if not os.path.exists(stranded_dir):
+            print('FAIL: the worktree of a run with unaccepted work was removed')
+            return 1
+        if 'left worktree' not in stranded_log or 'kept' not in stranded_log:
+            print(f'FAIL: the leftover was not reported: {stranded_log[:300]}')
+            return 1
+        print('OK   a failed run kept and reported its unmerged worktree')
+
+        # The worktree of the driven cycle must not leak into the target tree.
+        if os.path.exists(os.path.join(repo, 'worker.txt')) is False:
+            print('FAIL: the target tree lost the merged result')
+            return 1
+        print('OK   the target tree carries the merged result')
         return 0
     finally:
         shutil.rmtree(work, ignore_errors=True)
