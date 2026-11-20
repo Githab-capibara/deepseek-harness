@@ -54,24 +54,45 @@ def main() -> int:
     # The harness routes every model through the `hnc/` prefix: the profile
     # names one provider per model family, and the prefix selects the channel
     # inside the gateway.
+    #
+    # The allowed model set is fixed and `auto` is never dispatched: a model
+    # that is rate-limited on one channel may answer on another, so every
+    # channel is asked about every model and the report names the pairs that
+    # answered.
+    #
+    # Each channel names the models its own way: the gateways prefix the
+    # family (`hnc/step-5-preview`), while freellmapi's catalog carries the
+    # bare lowercase id (`step-5-preview`). A wrong id is a 404, not a
+    # refusal, so the id is the channel's own.
+    models = [
+        'MiniMax-M3.1-Flash',
+        'Qwen3.8-Flash-Next',
+        'step-5-preview',
+        'longcat-2.5',
+    ]
     providers = [
-        ('omniroute', 'http://localhost:20128/v1', 'OMNIROUTE_API_KEY', 'hnc/step-5-preview'),
-        ('hnc', 'https://api.hcnsec.cn/v1', 'HNC_API_KEY', 'step-5-preview'),
-        ('freellmapi', 'http://localhost:8080/v1', 'FREELLMAPI_API_KEY', 'step-5-preview'),
+        ('omniroute', 'http://localhost:20128/v1', 'OMNIROUTE_API_KEY', 'hnc/'),
+        ('hnc', 'https://api.hcnsec.cn/v1', 'HNC_API_KEY', ''),
+        ('freellmapi', 'http://localhost:8080/v1', 'FREELLMAPI_API_KEY', '', True),
     ]
     failures = 0
-    for name, base_url, key_name, model in providers:
+    answered = 0
+    for name, base_url, key_name, prefix, *lower in providers:
         try:
             key = env_value(key_name)
         except SystemExit as error:
             print(f'{name}: skipped ({error})')
             continue
-        answer = ask(base_url, key, model, prompt)
-        if answer.startswith(('HTTP', 'network:', 'no choices', 'no answer')):
-            print(f'{name}/{model}: FAILED — {answer[:160]}')
-            failures += 1
-        else:
-            print(f'{name}/{model}: OK — {answer[:120]}')
+        for model in models:
+            model_id = model.lower() if lower else model
+            answer = ask(base_url, key, prefix + model_id, prompt)
+            if answer.startswith(('HTTP', 'network:', 'no choices', 'no answer')):
+                print(f'{name}/{prefix}{model_id}: FAILED — {answer[:160]}')
+                failures += 1
+            else:
+                print(f'{name}/{prefix}{model_id}: OK — {answer[:120]}')
+                answered += 1
+    print(f'\n{answered} of {len(providers) * len(models)} channel/model pairs answered')
     return 1 if failures else 0
 
 

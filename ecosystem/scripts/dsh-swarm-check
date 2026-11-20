@@ -8,6 +8,7 @@ main branch.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -27,6 +28,11 @@ MODEL_PATCH = os.path.join(REPO, 'ecosystem', 'ecosystem-check-model.yml')
 
 
 def main() -> int:
+    # The task must start from an empty tree: a leftover `ecosystem-check/`
+    # from an earlier run makes the agent find the work already done and skip
+    # the swarm, so the check would report success without ever dispatching.
+    work = os.path.join(REPO, 'ecosystem-check')
+    shutil.rmtree(work, ignore_errors=True)
     result = subprocess.run(
         ['node', CLI, '--profile', 'headless', '--patch', MODEL_PATCH, TASK],
         capture_output=True, text=True, timeout=7200, cwd=REPO,
@@ -55,6 +61,24 @@ def main() -> int:
         print(f'\nprovider rate limits: {len(rate_limits)}')
         for line in rate_limits[:2]:
             print(f'  {line[:140]}')
+    delivered = sorted(os.listdir(work)) if os.path.isdir(work) else []
+    print(f'\ndelivered files: {delivered}')
+    # The swarm must have actually run: the tool call, the worktrees, and the
+    # merged result are three separate facts, and the check asserts all three.
+    dispatched = 'pre-execute: swarm_dispatch' in output
+    print(f'swarm_dispatch called: {dispatched}')
+    if not dispatched:
+        print('FAIL: the swarm was never dispatched')
+        return 1
+    if not worktree_paths:
+        print('FAIL: no worker worktree was created')
+        return 1
+    expected = {'a.py', 'b.py', 'c.py', 'test_modules.py'}
+    missing = expected - set(delivered)
+    if missing:
+        print(f'FAIL: the swarm did not deliver {sorted(missing)}')
+        return 1
+    print('OK: the swarm dispatched, isolated its workers, and delivered every module')
     return 0
 
 

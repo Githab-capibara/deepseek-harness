@@ -100,7 +100,7 @@ so the staged-whitespace check skips `ecosystem/profiles/*/patches/*.patch`.
 | `dsh-provider-check` | Ask one model through the harness's own provider chain and report the status, latency, and first bytes. Network-dependent: a refusal is reported, not retried. |
 | `dsh-swarm-worktree-check` | Drive the worktree cycle on a temporary repository: a worktree branch, a worker commit, the merge back into main, the release, and the keep-on-failure path. |
 | `dsh-swarm-spawn-check` | Reproduce one swarm task-agent spawn against the real profile runtime and report the activation spec. |
-| `dsh-swarm-check` | Drive one complex task through the swarm and report the dispatch, the worktrees, and the plugin failures. |
+| `dsh-swarm-check` | Drive one complex task through the swarm and report the dispatch, the worktrees, and the plugin failures. The check clears its target directory first and then asserts the dispatch, the worktree isolation, and the delivered modules — a leftover tree would let the agent find the work already done and skip the swarm. |
 | `dsh-swarm-trace` | Locate the exact line that fails a swarm task-agent spawn (diagnostic companion of `dsh-swarm-spawn-check`). |
 | `dsh-local-ru-check` | Fetch the served client bundles and assert every Russian dictionary key reaches the browser. |
 | `dsh-local-ru-build` | Rebuild the Russian-locale client bundle from the tables. |
@@ -142,3 +142,10 @@ ecosystem/scripts/dsh-swarm-worktree-check
 model set is fixed (`MiniMax-M3.1-Flash`, `Qwen3.8-Flash-Next`, `step-5-preview`,
 `longcat-2.5`, `auto` is never dispatched) and the check retries in a circle until
 a provider answers.
+
+`dsh-provider-check` asks every channel about every model in the allowed set and
+reports the pairs that answered, so a model that is rate-limited on one channel
+is visibly available on another. The channels name the models their own way:
+the gateways prefix the family (`hnc/step-5-preview`), while freellmapi's
+catalog carries the bare lowercase id (`step-5-preview`). A wrong id is a 404,
+not a refusal.
