@@ -101,6 +101,8 @@ so the staged-whitespace check skips `ecosystem/profiles/*/patches/*.patch`.
 | `dsh-swarm-worktree-check` | Drive the worktree cycle on a temporary repository: a worktree branch, a worker commit, the merge back into main, the release, and the keep-on-failure path. |
 | `dsh-swarm-spawn-check` | Reproduce one swarm task-agent spawn against the real profile runtime and report the activation spec. |
 | `dsh-swarm-check` | Drive one complex task through the swarm and report the dispatch, the worktrees, and the plugin failures. The check clears its target directory first and then asserts the dispatch, the worktree isolation, and the delivered modules — a leftover tree would let the agent find the work already done and skip the swarm. |
+| `dsh-swarm-crosscheck` | Cross-check the modules the swarm delivered against independent references: `math.factorial` for `alpha`, a reference Fibonacci sequence for `beta`, a reference primality test for `gamma`. A wrong implementation cannot agree with itself. |
+| `dsh-swarm-beta-check` | Verify `beta` against an independent reference implementation, including the specified values, a closed range, and a known large value. |
 | `dsh-swarm-trace` | Locate the exact line that fails a swarm task-agent spawn (diagnostic companion of `dsh-swarm-spawn-check`). |
 | `dsh-local-ru-check` | Fetch the served client bundles and assert every Russian dictionary key reaches the browser. |
 | `dsh-local-ru-build` | Rebuild the Russian-locale client bundle from the tables. |
@@ -136,6 +138,15 @@ ecosystem/scripts/dsh-plugin-unit-check
 ecosystem/scripts/dsh-local-ru-check
 ecosystem/scripts/dsh-swarm-spawn-check
 ecosystem/scripts/dsh-swarm-worktree-check
+```
+
+`dsh-swarm-check` delivers its modules into `ecosystem-check/`, and the two
+cross-checks verify what it delivered against references computed separately:
+
+```sh
+ecosystem/scripts/dsh-swarm-check
+ecosystem/scripts/dsh-swarm-crosscheck
+ecosystem/scripts/dsh-swarm-beta-check
 ```
 
 `dsh-swarm-check` and `dsh-provider-check` need a reachable provider: the allowed
