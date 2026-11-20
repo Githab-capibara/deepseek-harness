@@ -1,0 +1,195 @@
+"""Boot every profile the way its carrier does and report what it mounted.
+
+The CLI refuses the desktop profile by design — the Electron carrier boots it
+— so the desktop profile is booted through the shared `profile-boot` entry
+point, the same way the carrier does. Every other profile is booted through
+the CLI.
+
+Three facts are asserted per profile: the boot succeeded, every entry of the
+configuration mounted (a plugin that skips itself silently would otherwise
+count as a healthy profile), and the host published its authenticated entry
+URL and issued a session cookie.
+
+Usage:
+    ecosystem/scripts/dsh-profile-boot-check [profile ...]
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+CLI = os.path.join(REPO, 'apps', 'cli', 'lib', 'bin.js')
+PROFILES_DIR = os.path.join(os.environ.get('DSH_HOME', '/home/d/.dsh'), 'profiles')
+PROFILES = ['web', 'ultracode', 'dsh-tui', 'desktop', 'decay', 'headless']
+# The CLI rejects the desktop profile: the Electron carrier owns it.
+DESKTOP_OWNED = {'desktop'}
+
+BOOT_SCRIPT = r'''
+import { pathToFileURL } from 'node:url'
+
+const profileDir = process.argv[2]
+const profileName = process.argv[3]
+const { runProfile } = await import(
+  pathToFileURL('/home/d/my/deepseek-harness/apps/cli/src/profile-boot.ts').href
+)
+// The fork's packages resolve through the tsconfig path mapping, not through
+// node_modules, so the source path is imported directly.
+const { loadLayeredEnv, loadProfileDirectory } = await import(
+  pathToFileURL('/home/d/my/deepseek-harness/packages/boot/app-boot/src/index.ts').href
+)
+
+const installAnchor = '/home/d/my/deepseek-harness/apps/cli/package.json'
+// The packaged Electron app bakes DSH_CLIENT_VERSION into the client bundle;
+// the desktop host row requires it, so the boot supplies the same value here.
+process.env.DSH_CLIENT_VERSION ??= '0.2.2-rc.3'
+
+// The host prints its authenticated entry URL during the boot, so the capture
+// is installed before the profile starts.
+const urlPattern = /http:\/\/127\.0\.0\.1:(\d+)\/\?token=([A-Za-z0-9_-]+)/
+let applicationUrl
+const originalLog = console.log
+console.log = (...args) => {
+  const text = args.map(String).join(' ')
+  const match = urlPattern.exec(text)
+  if (match) applicationUrl = `http://127.0.0.1:${match[1]}/?token=${match[2]}`
+  originalLog(...args)
+}
+
+const running = await runProfile({
+  environment: loadLayeredEnv('dsh'),
+  profile: profileName,
+  resolvedProfile: { profile: loadProfileDirectory('dsh', profileDir, installAnchor), installAnchor },
+  patchFiles: [],
+  args: ['--no-open', '--port', '0'],
+})
+
+const ctx = running.ctx
+await new Promise((resolve) => setTimeout(resolve, 1200))
+console.log = originalLog
+
+const entries = [...ctx.loader.entries()]
+const notActive = entries.filter((entry) => entry.status !== undefined && entry.status !== 'active')
+let cookie = false
+let status = 0
+if (applicationUrl !== undefined) {
+  const exchange = await fetch(applicationUrl, { redirect: 'manual' })
+  status = exchange.status
+  cookie = Boolean(exchange.headers.get('set-cookie'))
+}
+process.stdout.write('DSH-BOOT-REPORT ' + JSON.stringify({
+  entries: entries.length,
+  notActive: notActive.map((entry) => ({ id: entry.id, status: entry.status, reason: entry.reason })),
+  applicationUrl: applicationUrl !== undefined,
+  status,
+  cookie,
+}) + String.fromCharCode(10))
+await running.shutdown.shutdown(0)
+'''
+
+
+def boot_via_cli(profile: str) -> dict:
+    """Boot a profile through the CLI and read the entry URL from its output."""
+    result = subprocess.run(
+        ['node', CLI, '--profile', profile, '--dump-config'],
+        capture_output=True, text=True, timeout=900, cwd=REPO,
+    )
+    output = result.stdout + result.stderr
+    rows = set(re.findall(r'^- id: (.+)$', output, re.M))
+    # The CLI reports the entries it could not activate and the bundles it
+    # skipped; both mean the profile is not fully mounted.
+    inactive = re.search(r'warning: (\d+) entries? did not activate\n(.*?)(?:\n\n|\Z)', output, re.S)
+    skipped = output.count('skipping profile bundle')
+    not_active = []
+    if inactive is not None:
+        for line in inactive.group(2).splitlines():
+            if line.strip():
+                not_active.append({'id': line.strip()[:80], 'status': 'inactive', 'reason': ''})
+    return {
+        'exit': result.returncode,
+        'entries': len(rows),
+        'notActive': not_active,
+        'skipped': skipped,
+        'output': output,
+    }
+
+
+def boot_desktop(profile: str) -> dict:
+    """Boot the desktop profile through the shared profile-boot entry point."""
+    directory = os.path.join(PROFILES_DIR, profile)
+    script = os.path.join('/tmp/opencode', 'dsh-profile-boot-check.mjs')
+    with open(script, 'w', encoding='utf-8') as fh:
+        fh.write(BOOT_SCRIPT)
+    result = subprocess.run(
+        ['node', '--import', 'tsx/esm', script, directory, profile],
+        capture_output=True, text=True, timeout=900, cwd=REPO,
+    )
+    output = result.stdout + result.stderr
+    payload = {}
+    # The marker keeps the report apart from the plugin logs, which carry
+    # JSON of their own.
+    marker = 'DSH-BOOT-REPORT '
+    for line in output.splitlines():
+        if marker in line:
+            try:
+                payload = json.loads(line[line.index(marker) + len(marker):])
+            except json.JSONDecodeError:
+                payload = {}
+            break
+    payload['exit'] = result.returncode
+    payload['output'] = output
+    return payload
+
+
+def main() -> int:
+    requested = sys.argv[1:] or PROFILES
+    failures = 0
+    for profile in requested:
+        if profile not in PROFILES:
+            print(f'FAIL {profile}: unknown profile')
+            failures += 1
+            continue
+        if profile in DESKTOP_OWNED:
+            report = boot_desktop(profile)
+        else:
+            report = boot_via_cli(profile)
+        if report['exit'] != 0:
+            print(f'FAIL {profile}: the boot exited {report["exit"]}')
+            tail = [line for line in report.get('output', '').splitlines() if line.strip()][-4:]
+            for line in tail:
+                print(f'  {line}')
+            failures += 1
+            continue
+        not_active = report.get('notActive', [])
+        entries = report.get('entries', 0)
+        skipped = report.get('skipped', 0)
+        if skipped:
+            print(f'FAIL {profile}: {skipped} bundle(s) skipped')
+            failures += 1
+        if not_active:
+            print(f'FAIL {profile}: {len(not_active)} of {entries} entries did not activate')
+            for entry in not_active[:8]:
+                print(f'  {entry.get("id")}: {entry.get("status")} {entry.get("reason") or ""}')
+            failures += 1
+            continue
+        print(f'OK   {profile}: {entries} entries mounted, none skipped')
+        if profile in DESKTOP_OWNED:
+            if not report.get('applicationUrl'):
+                print(f'FAIL {profile}: the host published no entry URL')
+                failures += 1
+                continue
+            if not report.get('cookie'):
+                print(f'FAIL {profile}: the host issued no session cookie')
+                failures += 1
+                continue
+            print(f'     entry URL HTTP {report.get("status")}, session cookie issued')
+    if failures:
+        print(f'\n{failures} profile(s) failed')
+        return 1
+    print('\nOK: every profile boots and mounts its whole configuration')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

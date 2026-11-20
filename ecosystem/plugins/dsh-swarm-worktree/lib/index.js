@@ -145,23 +145,25 @@ export function apply(ctx, config) {
         // The worktree service lives in the host composition; a plugin scope
         // may not see it directly, so every candidate scope is tried.
         const candidates = [ctx];
+        let scoped;
         try {
-            const scoped = ctx.scope?.();
-            if (scoped !== undefined)
-                candidates.push(scoped);
+            scoped = ctx.scope?.();
         }
-        catch {
-            // no scope accessor
+        catch (_scopeUnavailable) {
+            // A context without a scope accessor resolves the service itself.
         }
+        if (scoped !== undefined)
+            candidates.push(scoped);
         for (const candidate of candidates) {
+            let found;
             try {
-                const found = candidate.get('worktree');
-                if (found !== undefined)
-                    return found;
+                found = candidate.get('worktree');
             }
-            catch {
-                // this scope cannot resolve the service
+            catch (_serviceUnreachable) {
+                // This scope cannot resolve the service; the next candidate may.
             }
+            if (found !== undefined)
+                return found;
         }
         return undefined;
     };
@@ -419,23 +421,25 @@ export function apply(ctx, config) {
     // every known scope candidate is probed.
     const swarmService = () => {
         const candidates = [ctx];
+        let scoped;
         try {
-            const scoped = ctx.scope?.();
-            if (scoped !== undefined)
-                candidates.push(scoped);
+            scoped = ctx.scope?.();
         }
-        catch {
-            // no scope accessor
+        catch (_scopeUnavailable) {
+            // A context without a scope accessor resolves the service itself.
         }
+        if (scoped !== undefined)
+            candidates.push(scoped);
         for (const candidate of candidates) {
+            let found;
             try {
-                const found = candidate.get('swarm');
-                if (found !== undefined)
-                    return found;
+                found = candidate.get('swarm');
             }
-            catch {
-                // this scope cannot resolve the service
+            catch (_serviceUnreachable) {
+                // This scope cannot resolve the service; the next candidate may.
             }
+            if (found !== undefined)
+                return found;
         }
         return undefined;
     };

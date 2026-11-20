@@ -103,7 +103,8 @@ export function reclaimStaleSwarmMarkers(home = process.env.DSH_HOME ?? join(hom
         try {
             raw = readFileSync(marker, 'utf8');
         }
-        catch {
+        catch (_markerUnreadable) {
+            // A storage directory without a marker holds no ownership to reclaim.
             continue;
         }
         const match = /"pid"\s*:\s*(\d+)/.exec(raw);
@@ -114,11 +115,12 @@ export function reclaimStaleSwarmMarkers(home = process.env.DSH_HOME ?? join(hom
             continue;
         try {
             unlinkSync(marker);
-            reclaimed.push(marker);
         }
-        catch {
-            // Another writer may have released it in the meantime; ignore.
+        catch (_markerAlreadyReleased) {
+            // Another writer released the marker in the meantime; the reclaim
+            // this run performs is still correct.
         }
+        reclaimed.push(marker);
     }
     return reclaimed;
 }

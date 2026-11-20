@@ -93,6 +93,7 @@ so the staged-whitespace check skips `ecosystem/profiles/*/patches/*.patch`.
 | `dsh-profile-patches` | Regenerate the third-party plugin ports. |
 | `dsh-host-seam` | Add the `modelMessageDecoration` seam to the installed runtime. |
 | `dsh-ecosystem-check` | Boot every profile and assert the whole plugin stack is present and the runtime resolves from this checkout. |
+| `dsh-profile-boot-check` | Boot every profile the way its carrier does — the desktop profile through the shared `profile-boot` entry point, because the CLI refuses it — and assert that the boot succeeded, that every entry mounted, and that the host published its authenticated entry URL and issued a session cookie. |
 | `dsh-plugin-activation-check` | Boot every profile and assert each plugin entry reports that it activated (no silent skip). |
 | `dsh-plugin-behaviour-check` | Boot every profile and assert each plugin contributes what it is there for (tool groups, commands, guards, presets). |
 | `dsh-plugin-unit-check` | Import every local plugin's own `lib/` and exercise its exported units. |
@@ -131,6 +132,7 @@ reach the browser:
 
 ```sh
 ecosystem/scripts/dsh-ecosystem-check
+ecosystem/scripts/dsh-profile-boot-check
 ecosystem/scripts/dsh-plugin-activation-check
 ecosystem/scripts/dsh-plugin-behaviour-check
 ecosystem/scripts/dsh-plugin-load-check

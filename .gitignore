@@ -12,6 +12,7 @@ lib/
 !ecosystem/plugins/*/lib/
 # Byte-compiled operator scripts are build residue, not sources.
 ecosystem/scripts/__pycache__/
+.agents/**/__pycache__/
 pnpm-debug.log
 .pnpm-store/
 .cache/
