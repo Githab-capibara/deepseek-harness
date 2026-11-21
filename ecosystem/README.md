@@ -90,6 +90,7 @@ so the staged-whitespace check skips `ecosystem/profiles/*/patches/*.patch`.
 | Script | Purpose |
 |--------|---------|
 | `dsh-profiles-sync` | Rebuild every profile from the template. Idempotent. |
+| `dsh-launcher-install` | Point the `dsh` launcher wrapper at this fork's built CLI. The wrapper is machine-local, and the npm-released launcher resolves an older runtime: it rejects the fork's plugin bundles as incompatible and the profile's own packages fail to import against it. `--check` reports whether the wrapper already runs the fork. |
 | `dsh-profile-patches` | Regenerate the third-party plugin ports. |
 | `dsh-host-seam` | Add the `modelMessageDecoration` seam to the installed runtime. |
 | `dsh-ecosystem-check` | Boot every profile and assert the whole plugin stack is present and the runtime resolves from this checkout. |
@@ -119,11 +120,21 @@ so the staged-whitespace check skips `ecosystem/profiles/*/patches/*.patch`.
 
 ## Operating this tree
 
-Rebuild every profile from the template:
+Rebuild every profile from the template, and point the `dsh` launcher at this
+fork:
 
 ```sh
 ecosystem/scripts/dsh-profiles-sync
+ecosystem/scripts/dsh-launcher-install
 ```
+
+The launcher wrapper lives in the installation's `bin` directory
+(`~/.local/share/dsh/bin/dsh`), which is separate from `$DSH_HOME`: the latter
+holds the profiles and the session data. The wrapper must run this fork's
+built CLI, because the profiles link the fork's runtime packages — the
+npm-released launcher resolves an older runtime, refuses the fork's plugin
+bundles as incompatible, and the profile's own packages fail to import against
+it.
 
 Then check the result. The boot checks prove the stack loads; the plugin checks
 prove each plugin activates and contributes; the swarm checks drive the real
