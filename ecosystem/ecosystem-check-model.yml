@@ -1,0 +1,7 @@
+# The model override for one operator check: a fast, non-reasoning model keeps
+# the run inside its token budget, so the check measures the harness rather
+# than the model's thinking length.
+- id: agent-default-model
+  config:
+    provider: omniroute
+    model: hnc/MiniMax-M3.1-Flash

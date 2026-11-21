@@ -96,6 +96,10 @@ const handle = await ctx.agents.create({
 
 循环在每个派生消息对象首次进入请求时执行深冻结，并且仅在同一 agent 内复用该证明。恢复的消息保留对象身份；构造请求不会冻结包含消息的事件包装对象。每个请求都会冻结本地规范化 header、新消息数组和请求封装，同时保留取消信号的可变性。[已归档的请求冻结决策](../../../.agents/notes/archived/simplification/2026-09-06-agent-request-freeze-evidence.md)解释了所有权与测量依据。
 
+### 请求消息装饰 seam
+
+可选的 `modelMessageDecoration` 提供方会在循环从 Session surface 派生请求消息之后、消息被冻结并发送之前，对这些消息做变换。循环用 `ctx.get('modelMessageDecoration')` 读取该提供方；没有提供方时请求保持不变。装饰仅作用于展示层：它不写入 Session 日志，且装饰后的文本必须是日志与该提供方自身规则的确定性函数。提供方还可以通过 `sanitizeAssistantMessage` 在循环提交助手消息之前改写它，并通过 `tokenOverhead` 报告它增加的展示 token；token meter 只把该开销加到启发式基线上，因为提供方的 usage 已经包含装饰后的请求文本。装饰后的请求可以携带没有持久 Session 身份的一次性 `RequestUserInput`；只有持久消息才进入循环的冻结集合。seam 及其服务接口位于 [`src/message-decoration.ts`](src/message-decoration.ts)。
+
 ### 源码地图
 
 | 文件 | 职责 |
@@ -104,6 +108,7 @@ const handle = await ctx.agents.create({
 | [`src/agent.ts`](src/agent.ts) | 具体 `ReactLoopAgent` 驱动器：收件箱、轮次／步骤状态机、取消 |
 | [`src/inbox.ts`](src/inbox.ts) | 包内部的 `ReactLoopInbox`：持久投影、结构化命令与仅供循环使用的领取状态 |
 | [`src/runtime-context.ts`](src/runtime-context.ts) | 逐步骤运行时上下文快照处理 |
+| [`src/message-decoration.ts`](src/message-decoration.ts) | 可选的 `modelMessageDecoration` 服务接口：请求装饰、助手消息净化、token 开销 |
 
 ### 创建与拆除
 

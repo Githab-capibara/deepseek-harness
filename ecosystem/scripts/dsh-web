@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Print the current DeepSeek Harness Web UI URL (and optionally open it).
+#
+# The web server mints a fresh access token on every start, so the URL is
+# read from the service log instead of being hard-coded.
+#
+#   dsh-web         print the URL
+#   dsh-web --open  print the URL and open it in the default browser
+set -euo pipefail
+
+UNIT=dsh-web.service
+open_browser=0
+for arg in "$@"; do
+  case "$arg" in
+    --open) open_browser=1 ;;
+    *) echo "dsh-web: unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
+
+url=$(journalctl --user -u "$UNIT" --no-pager -n 100 2>/dev/null \
+  | grep -o 'http://127\.0\.0\.1:3080/?token=[A-Za-z0-9_-]*' | tail -1 || true)
+
+if [ -z "$url" ]; then
+  echo "dsh-web: the web UI is not running. Start it with: systemctl --user start $UNIT" >&2
+  exit 1
+fi
+
+echo "$url"
+
+if [ "$open_browser" -eq 1 ]; then
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url" >/dev/null 2>&1 &
+  else
+    echo "dsh-web: xdg-open not found, open the URL manually" >&2
+  fi
+fi

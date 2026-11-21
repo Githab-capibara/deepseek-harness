@@ -1,0 +1,40 @@
+diff --git a/lib/index.js b/lib/index.js
+index e1e20a683d5046ed0dd6c0469201085cb5e133a5..45b12c8ef26ea912341ed6696471ebbbb400df21 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -22,7 +22,9 @@ import { join } from 'node:path';
+ export const name = 'verify-judge';
+ export const inject = ['shell', 'goals'];
+ /** Durable source tag for messages this plugin steers into the turn. */
+-const PLUGIN_SOURCE = { kind: 'plugin', plugin: 'verify-judge' };
++// DSH session format v4 refuses the retired 'plugin' source kind; the
++// producer-owned spelling for a plugin-authored message is 'plugin:<name>'.
++const PLUGIN_SOURCE = { kind: 'plugin:verify-judge' };
+ /**
+  * Validate the raw loader config; misconfiguration fails loud at load.
+  * @param raw - the plugin row's `config` value.
+@@ -115,12 +117,22 @@ async function runVerification(ctx, config, cwd, signal) {
+             return { status: 'interrupted', failures };
+         let result;
+         try {
+-            result = await ctx.shell.run(ctx.shell.resolve({
++            // DSH 0.2.x 的 shell seam 是 `resolve()` → `execute()` → `result()`
++            // （`run()` 是更早的版本才有的写法，在 0.2.2-rc.1 上不存在）。
++            // 两个分支都留着：老宿主继续走 run()，新宿主走 execute()。
++            const spec = ctx.shell.resolve({
+                 command,
+                 workdir: cwd,
+                 timeoutMs: config.timeoutMs,
+                 signal,
+-            }));
++            });
++            if (typeof ctx.shell.run === 'function') {
++                result = await ctx.shell.run(spec);
++            }
++            else {
++                const execution = await ctx.shell.execute(spec);
++                result = await execution.result();
++            }
+         }
+         catch (error) {
+             // Infrastructure failure (spawn/sandbox runner) — fail closed with a

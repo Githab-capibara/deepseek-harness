@@ -112,6 +112,12 @@ async function main(args: string[]): Promise<number> {
   const mode = parseMode(args[0])
   const workerEnv = ciWorkerEnvironment(mode, process.env)
   Object.assign(process.env, workerEnv)
+  // Node samples the proxy environment when the process starts, so the setup
+  // file cannot unbind it afterwards, and every local fixture server a gate
+  // starts would receive its requests through the machine's proxy instead of
+  // through loopback. The test budget matches the CI workflows.
+  delete process.env.NODE_USE_ENV_PROXY
+  process.env.DSH_COVERAGE_TEST_TIMEOUT_MS ??= '90000'
   if (Object.keys(workerEnv).length > 0) console.log(`run-gates: worker settings ${JSON.stringify(workerEnv)}`)
   const gates = gatesForMode(mode)
   return runAggregate(mode, gates, defaultConcurrency(mode, gates.length))

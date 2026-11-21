@@ -1,0 +1,8 @@
+# Bundle layer contributed by dsh-local-ru.
+# The translation tables live in the package's locale/ directory; this row
+# registers the client half so the browser picks them up.
+- insert:
+    - id: dsh-local-ru
+      name: dsh-local-ru
+      config:
+        enabled: true

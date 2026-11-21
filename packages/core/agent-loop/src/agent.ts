@@ -19,7 +19,7 @@ import type {
   RequestErrorAction,
 } from '@deepseek-ai/dsh-agent'
 import { AgentModel, agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
-import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall, RequestMessage } from '@deepseek-ai/dsh-llm'
 import {
   LlmError,
   createAssistantMessage,
@@ -37,6 +37,7 @@ import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import { ToolActivationError, ToolBatchExecutionError } from '@deepseek-ai/dsh-tools'
 import type { ResolvedToolSet } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
+import type { ModelMessageDecorationService } from './message-decoration.ts'
 import { ReactLoopInbox } from './inbox.ts'
 import { RuntimeContextProjection } from './runtime-context.ts'
 import { AssistantStreamAttempt } from './assistant-stream.ts'
@@ -508,17 +509,20 @@ export class ReactLoopAgent implements Agent {
           if (signal.aborted) {
             const content = live.interruptedBlocks()
             if (content.length > 0) {
+              const interrupted = createAssistantMessage({
+                content,
+                source: {
+                  provider: request.provider,
+                  model: request.model,
+                  ...live.replayState === undefined ? {} : { replayState: live.replayState },
+                },
+              })
+              const decoration = this.loopCtx.get('modelMessageDecoration') as ModelMessageDecorationService | undefined
+              const message = decoration?.sanitizeAssistantMessage?.(this.session, interrupted) ?? interrupted
               live.settle('assistant/message', () => this.session.append('assistant/message', {
                 turn,
                 step,
-                message: createAssistantMessage({
-                  content,
-                  source: {
-                    provider: request.provider,
-                    model: request.model,
-                    ...live.replayState === undefined ? {} : { replayState: live.replayState },
-                  },
-                }),
+                message,
                 interrupted: true,
                 ...live.usage === undefined ? {} : { usage: live.usage },
                 stream: live.stream,
@@ -577,19 +581,21 @@ export class ReactLoopAgent implements Agent {
             ...live.replayState !== undefined ? { replayState: live.replayState } : {},
           },
         })
+        const decoration = this.loopCtx.get('modelMessageDecoration') as ModelMessageDecorationService | undefined
+        const committed = decoration?.sanitizeAssistantMessage?.(this.session, message) ?? message
         live.settle(
           'assistant/message',
           () => this.session.append('assistant/message', {
             turn,
             step,
-            message,
+            message: committed,
             ...live.usage === undefined ? {} : { usage: live.usage },
             stream: live.stream,
           }, { surfaceOp: 'append' }).seq,
         )
         if (finish.kind === 'max-tokens') return { kind: 'max-tokens' }
 
-        const toolCalls = message.content.filter(block => block.type === 'tool-call')
+        const toolCalls = committed.content.filter(block => block.type === 'tool-call')
         if (toolCalls.length === 0) return { kind: 'completed' }
         const maxParallelToolCalls = this.loopCtx.agentLoop.config.maxParallelToolCalls.get()
         try {
@@ -732,15 +738,23 @@ export class ReactLoopAgent implements Agent {
     // canonicalHeader is shallow; append logs a detached snapshot, not these local values.
     deepFreeze(header)
     const boundaryMessages = session.deriveMessages()
-    for (const message of boundaryMessages) {
+    // Optional presentation-only decoration (local seam; absent provider = no-op).
+    const decoration = this.loopCtx.get('modelMessageDecoration') as ModelMessageDecorationService | undefined
+    const requestMessages: RequestMessage[] = decoration === undefined
+      ? boundaryMessages
+      : decoration.decorate(session, boundaryMessages)
+    for (const message of requestMessages) {
+      // A decorated request may carry a one-shot RequestUserInput, which has no
+      // durable Session identity; only durable messages join the frozen set.
+      if (message.id === undefined) continue
       if (this.frozenMessages.has(message)) continue
       deepFreeze(message)
       this.frozenMessages.add(message)
     }
-    Object.freeze(boundaryMessages)
+    Object.freeze(requestMessages)
     const request = markAgentLoopRequest(Object.freeze({
       ...header.config,
-      messages: boundaryMessages,
+      messages: requestMessages,
       toolHistory: session.toolHistory(),
       ...header.tools !== undefined ? { tools: header.tools } : {},
       sessionId: this.session.id,

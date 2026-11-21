@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Drive one complex task through the fork's swarm and report what happened.
+
+The task splits into independent parts on purpose: the harness must dispatch a
+swarm, give every worker its own worktree, and merge the results back into the
+main branch.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+CLI = os.path.join(REPO, 'apps', 'cli', 'lib', 'bin.js')
+TASK = (
+    'В этом репозитории создай три независимых Python-модуля в каталоге '
+    'ecosystem-check/: модуль a.py с функцией alpha(), модуль b.py с функцией '
+    'beta(), модуль c.py с функцией gamma(). Каждый модуль реализует свой '
+    'алгоритм: a.py — факториал, b.py — последовательность Фибоначчи, '
+    'c.py — проверку простоты числа. Добавь тест test_modules.py, который '
+    'проверяет все три функции. Это задача из трёх независимых подсистем, '
+    'каждая требует своей реализации и своей проверки.'
+)
+MODEL = os.environ.get('DSH_TEST_MODEL', 'hnc/MiniMax-M3.1-Flash')
+MODEL_PATCH = os.path.join(REPO, 'ecosystem', 'ecosystem-check-model.yml')
+
+
+def main() -> int:
+    # The task must start from an empty tree: a leftover `ecosystem-check/`
+    # from an earlier run makes the agent find the work already done and skip
+    # the swarm, so the check would report success without ever dispatching.
+    work = os.path.join(REPO, 'ecosystem-check')
+    shutil.rmtree(work, ignore_errors=True)
+    result = subprocess.run(
+        ['node', CLI, '--profile', 'headless', '--patch', MODEL_PATCH, TASK],
+        capture_output=True, text=True, timeout=7200, cwd=REPO,
+    )
+    output = result.stdout + result.stderr
+    with open('/tmp/opencode/swarm-e2e.log', 'w', encoding='utf-8') as fh:
+        fh.write(output)
+    swarm_calls = sorted(set(re.findall(r'swarm_[a-z_]+', output)))
+    worktree_paths = sorted(set(re.findall(r'\.dsh/worktrees/[^\s\'"]+', output)))
+    spawned = sorted(set(re.findall(r'deps\.start label=(\S+)', output)))
+    print(f'exit code: {result.returncode}')
+    print(f'model: {MODEL}')
+    print(f'swarm tools used: {swarm_calls}')
+    print(f'workers spawned: {spawned}')
+    print(f'worktrees mentioned: {len(worktree_paths)}')
+    for path in worktree_paths[:8]:
+        print(f'  {path}')
+    failures = [line for line in output.splitlines()
+                if re.search(r'\((?:[a-z@/-]+)\): (?:Error|TypeError)', line)]
+    if failures:
+        print(f'\nplugin failures: {len(failures)}')
+        for line in failures[:5]:
+            print(f'  {line}')
+    rate_limits = re.findall(r'RATE_LIMIT[^\n]*', output)
+    if rate_limits:
+        print(f'\nprovider rate limits: {len(rate_limits)}')
+        for line in rate_limits[:2]:
+            print(f'  {line[:140]}')
+    delivered = sorted(os.listdir(work)) if os.path.isdir(work) else []
+    print(f'\ndelivered files: {delivered}')
+    # The swarm must have actually run: the tool call, the worktrees, and the
+    # merged result are three separate facts, and the check asserts all three.
+    dispatched = 'pre-execute: swarm_dispatch' in output
+    print(f'swarm_dispatch called: {dispatched}')
+    if not dispatched:
+        print('FAIL: the swarm was never dispatched')
+        return 1
+    if not worktree_paths:
+        print('FAIL: no worker worktree was created')
+        return 1
+    expected = {'a.py', 'b.py', 'c.py', 'test_modules.py'}
+    missing = expected - set(delivered)
+    if missing:
+        print(f'FAIL: the swarm did not deliver {sorted(missing)}')
+        return 1
+    print('OK: the swarm dispatched, isolated its workers, and delivered every module')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

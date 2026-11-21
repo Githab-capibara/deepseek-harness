@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+"""Rebuild every DSH profile from one template so all front-ends share the
+same plugin stack.
+
+Profiles (all boot the same plugins, only the app surface differs):
+
+  web        browser dashboard + always-on systemd service
+  ultracode  TUI (dsh-tui 0.20.1) with the UltraCode preset
+  dsh-tui    plain TUI surface, same stack
+  desktop    the desktop client's own profile (Electron carrier boots it)
+  decay      web surface where dsh-context-decay owns context reduction
+  headless   one-shot `dsh headless "task"` surface
+
+Context reduction: exactly ONE reducer may run at a time. dsh-context-decay
+(model-driven, the NVIDIA "you don't need long context" method) is mounted
+everywhere, so the official automatic compaction (host `compaction-basic.auto`,
+the preset's compaction group and @ohmejj/dsh-auto-compact) is switched off.
+The manual `/compact` command stays available as an emergency fallback.
+
+The script is idempotent and re-runnable; it only rewrites the profile
+manifest, patch layer and pnpm settings, then reinstalls the dependencies.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+# The ecosystem lives next to this script inside the fork, so every path is
+# derived from the script location: the fork works from any checkout.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ECOSYSTEM_DIR = os.path.dirname(SCRIPT_DIR)
+REPO_ROOT = os.path.dirname(ECOSYSTEM_DIR)
+PLUGINS_DIR = os.path.join(ECOSYSTEM_DIR, "plugins")
+
+HOME = os.environ.get("DSH_HOME", "/home/d/.dsh")
+PROFILES = os.path.join(HOME, "profiles")
+# The canonical profile template lives in the fork, not in the profile it
+# generates: a template read back from its own output would be rewritten by
+# the next run and lose the configuration.
+TEMPLATE = os.path.join(ECOSYSTEM_DIR, "profiles", "ultracode")
+
+
+def local_plugin(name: str) -> str:
+    """A `file:` dependency on a plugin shipped by this fork."""
+    return "file:" + os.path.join(PLUGINS_DIR, name)
+
+
+def local_runtime() -> dict[str, str]:
+    """The fork's runtime packages, linked into the profile.
+
+    A plugin peer-depends on `@deepseek-ai/dsh-*`. Without a link the profile
+    installs the npm release of that package, which shadows the fork's runtime
+    with an older one and crashes the host on startup. `link:` in
+    `pnpm.overrides` only applies to DIRECT dependencies, so the runtime
+    packages are listed as direct ones.
+
+    The vendored Cordis foundations travel with them: a plugin that imports
+    `@deepseek-ai/schemastery` or `@deepseek-ai/cosmokit` needs the fork's
+    copy, and an override alone does not place one in the profile.
+    """
+    linked = {}
+    for name, relative in RUNTIME_PACKAGES.items():
+        linked[name] = "link:" + os.path.join(REPO_ROOT, relative)
+    for name, relative in VENDOR_PACKAGES.items():
+        linked[name] = "link:" + os.path.join(REPO_ROOT, relative)
+    return linked
+
+
+PLUGIN_DEPS = {
+    # Pinned to the upstream commit that carries the config-driven settings
+    # port: a plain `github:` specifier resolves to whatever the registry
+    # cached, which may predate this runtime.
+    "@doiiarx/dsh-todo-continuation": "github:DoiiarX/dsh-todo-continuation#52e2eb44e5a53605331d8938c76dd3783b327ef6",
+    "dsh-git-worktree": "github:KHG420/git-worktree",
+    "dsh-gitnexus-plugin": "github:akash-digitavision/dsh-gitnexus-plugin",
+    "dsh-context-decay": "github:LDyty/dsh-context-decay",
+    "dsh-plugin-stalegreen": "^0.1.0",
+    "dsh-protect-tests": "^0.2.3",
+    "dsh-subagent-guard": "github:NightPainters/dsh-subagent-guard",
+    "dsh-swarm-orchestrator": "0.6.34",
+    "dsh-task-reliability": "^0.4.11",
+    "dsh-ultracode": "github:ParticleLight/dsh-ultracode",
+    "dsh-verify-judge": "github:zriyox/dsh-verify-judge",
+    "dsh-verify-kit": "github:xushilianzhuren/dsh-verify-kit",
+    "dsh-workflow-worktree": "github:lisycotana/dsh-workflow-worktree",
+    "dsh-worktree": "github:CSY656/dsh-worktree",
+    "dsh-subagent-compat": local_plugin("dsh-subagent-compat"),
+    "dsh-swarm-autonomy-guard": local_plugin("dsh-swarm-autonomy-guard"),
+    "dsh-swarm-worktree": local_plugin("dsh-swarm-worktree"),
+    # ── Надёжность и безопасность (см. анализ траектории) ──────────────
+    # dsh-agent-loop-guard: рвёт dedup-циклы повторных tool-вызовов
+    #   (в траектории: 11 одинаковых read models.rs подряд).
+    "@goodandready/dsh-agent-loop-guard": "0.2.29",
+    # dsh-baseline: fail-closed безопасность — egress, монотонный потолок
+    #   прав субагентов, хеш-цепоченный аудит решений.
+    "dsh-baseline": "0.1.0",
+    # dsh-auto-review: отвечает ЗА пользователя на approval-запросы
+    #   (второй read-only ревьюер, fail-closed).
+    "dsh-auto-review": "0.15.1",
+    # dsh-second-review: независимая оценка промпта/плана/качества работы
+    #   вторым агентом — карточка под каждым ответом.
+    "dsh-second-review": "1.3.6",
+    # dsh-stall-guard: сторож простоя — сам находит зависшие команды и
+    #   будит агента, когда он полностью остановился.
+    "dsh-stall-guard": "0.1.9",
+    # dsh-session-retry: перезапускает упавший turn сам, с растущим backoff.
+    "dsh-session-retry": "0.3.0",
+    # dsh-agent-frugality: механический completion gate (exit-0) + review
+    #   lane на дешёвой модели — «готово» = объективно проверено.
+    "dsh-agent-frugality": "0.1.5",
+    # Полная русская локализация ядра и экосистемы плагинов.
+    "@goodandready/dsh-russian-lang": "0.4.27",
+    # Переводы для плагинов, которых НЕТ в dsh-russian-lang (мой стек:
+    # swarm-orchestrator, baseline, context-decay, session-retry,
+    # stall-guard, second-review, agent-loop-guard, auto-review,
+    # agent-frugality, verify-kit, verify-judge, protect-tests,
+    # task-reliability, ultracode, subagent-guard, stalegreen).
+    "dsh-local-ru": local_plugin("dsh-local-ru"),
+}
+
+PLUGIN_BUNDLES = [
+    "dsh-swarm-orchestrator",
+    "dsh-task-reliability",
+    "dsh-protect-tests",
+    "dsh-plugin-stalegreen",
+    "dsh-subagent-guard",
+    "dsh-verify-kit",
+    "dsh-verify-judge",
+    "@doiiarx/dsh-todo-continuation",
+    "dsh-workflow-worktree",
+    "dsh-worktree",
+    "dsh-git-worktree",
+    "dsh-gitnexus-plugin",
+    "dsh-context-decay",
+    "dsh-swarm-autonomy-guard",
+    "dsh-swarm-worktree",
+    "@goodandready/dsh-agent-loop-guard",
+    "dsh-baseline",
+    "dsh-auto-review",
+    "dsh-second-review",
+    "dsh-stall-guard",
+    "dsh-session-retry",
+    "dsh-agent-frugality",
+    "@goodandready/dsh-russian-lang",
+    "dsh-local-ru",
+]
+
+PROFILES_SPEC = {
+    "web": {"app": "@deepseek-ai/dsh-web-app", "registry": "agent-preset-registry",
+            "store": "swarm", "app_dep": None},
+    "ultracode": {"app": "@deepseek-harness-tui/dsh-tui", "registry": "dsh-tui-agent-preset-registry",
+                  "store": "swarm-tui", "app_dep": ("@deepseek-harness-tui/dsh-tui", "0.20.1")},
+    "dsh-tui": {"app": "@deepseek-harness-tui/dsh-tui", "registry": "dsh-tui-agent-preset-registry",
+                "store": "swarm-tui2", "app_dep": ("@deepseek-harness-tui/dsh-tui", "0.20.1")},
+    "desktop": {"app": "@deepseek-ai/dsh-web-app", "registry": "agent-preset-registry",
+                "store": "swarm-desktop", "app_dep": None},
+    "decay": {"app": "@deepseek-ai/dsh-web-app", "registry": "agent-preset-registry",
+              "store": "swarm-decay", "app_dep": None},
+    "headless": {"app": "@deepseek-ai/dsh-headless", "registry": "agent-preset-registry",
+                 "store": "swarm-headless", "app_dep": None},
+}
+
+# The web app bundle ships the preset registry; the headless bundle does not,
+# so the headless profile needs it explicitly to make `ultracode` the default
+# agent mode there as well.
+EXTRA_DEPS = {
+    "headless": {"@deepseek-ai/dsh-agent-preset-registry": "0.2.2-rc.1"},
+}
+# The registry is a plugin, not a bundle: profiles whose app bundle does not
+# ship it (headless) mount it with an explicit insert row instead of patching
+# a row that does not exist.
+REGISTRY_INSERT = {"headless"}
+
+PRESET_COMPACTION_BLOCK = """                  - id: compaction
+                    name: cordis:group
+                    group: true
+                    isolate:
+                      compaction: true
+                      toolResultPruner: true
+                    config:
+                      - id: compaction-basic
+                        config:
+                          thresholdRatio: 0.92
+                        name: '@deepseek-ai/dsh-compaction-basic'
+                      - id: command-compact
+                        name: '@deepseek-ai/dsh-command-compact'
+                      - id: tool-result-pruner
+                        name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                        config:
+                          thresholdChars: 8192
+                          headChars: 4096
+                          tailChars: 1024
+"""
+
+PRESET_COMPACTION_REPLACEMENT = """                  # The preset's automatic compaction group is intentionally
+                  # absent: dsh-context-decay is the single context reducer in
+                  # every profile (host `compaction-basic.auto`, the in-place
+                  # surface rewriters and @ohmejj/dsh-auto-compact are all off).
+                  # Two reducers must never run at the same time. The manual
+                  # `/compact` command stays available as an emergency fallback.
+"""
+
+def build_patch(spec, store, name):
+    with open(os.path.join(TEMPLATE, "cordis.patch.yml"), encoding="utf-8") as fh:
+        text = fh.read()
+    registry_block = re.compile(
+        r"^- id: (?:dsh-tui-)?agent-preset-registry\n  config:\n    default: ultracode\n",
+        re.M)
+    if name in REGISTRY_INSERT:
+        insert = ("- insert:\n"
+                  "    - id: agent-preset-registry\n"
+                  "      name: '@deepseek-ai/dsh-agent-preset-registry'\n"
+                  "      config:\n"
+                  "        default: ultracode\n")
+        text, count = registry_block.subn(insert, text, count=1)
+        if count != 1:
+            raise SystemExit("registry block not found in the template")
+    else:
+        text = re.sub(r"^- id: (?:dsh-tui-)?agent-preset-registry$",
+                      f"- id: {spec['registry']}", text, count=1, flags=re.M)
+    text = re.sub(r'dshHomePath\("storages/swarm[^"]*"\)', f'dshHomePath("storages/{store}")', text)
+    if PRESET_COMPACTION_BLOCK in text:
+        text = text.replace(PRESET_COMPACTION_BLOCK, PRESET_COMPACTION_REPLACEMENT, 1)
+    elif "- id: compaction" in text and "intentionally" not in text:
+        raise SystemExit("preset compaction block shape changed; refusing to patch")
+    return text
+
+
+# The vendored Cordis foundations a plugin may import directly. The profile
+# needs its own copy: the host resolves them from its installation, a plugin
+# resolves them from the profile.
+VENDOR_PACKAGES = {
+    "@deepseek-ai/cosmokit": "vendor/cosmokit",
+    "@deepseek-ai/cordis": "vendor/cordis",
+    "@deepseek-ai/schemastery": "vendor/schemastery",
+}
+
+# The runtime packages the profile's plugins peer-depend on. The fork owns
+# them: a plugin that pulls the npm copy would shadow the fork's runtime with
+# an older one (the npm release has no `FiberState` runtime export), and the
+# host would crash on startup.
+RUNTIME_PACKAGES = {
+    "@deepseek-ai/dsh-agent": "packages/core/agent",
+    "@deepseek-ai/dsh-agent-loop": "packages/core/agent-loop",
+    "@deepseek-ai/dsh-agent-preset": "packages/preset/agent-preset",
+    "@deepseek-ai/dsh-agent-preset-registry": "packages/preset/agent-preset-registry",
+    "@deepseek-ai/dsh-brand": "packages/util/brand",
+    "@deepseek-ai/dsh-chunked-list": "packages/util/chunked-list",
+    "@deepseek-ai/dsh-client-locale": "packages/client/locale",
+    "@deepseek-ai/dsh-commands": "packages/interaction/commands",
+    "@deepseek-ai/dsh-home-paths": "packages/util/home-paths",
+    "@deepseek-ai/dsh-llm": "packages/llm/llm",
+    "@deepseek-ai/dsh-session": "packages/core/session",
+    "@deepseek-ai/dsh-subagent": "packages/subagent/subagent",
+    "@deepseek-ai/dsh-system-prompt": "packages/core/system-prompt",
+    "@deepseek-ai/dsh-timeout": "packages/util/timeout",
+    "@deepseek-ai/dsh-tools": "packages/core/tools",
+    "@deepseek-ai/dsh-typert-protocol": "packages/typert/protocol",
+    "@deepseek-ai/dsh-util-crypto": "packages/util/crypto",
+    "@deepseek-ai/dsh-util-values": "packages/util/values",
+}
+
+
+# Third-party plugins whose published code still calls APIs this runtime
+# removed. Each patch is a file under the profile template's patches/ directory.
+PROFILE_PATCHES = {
+    "dsh-plugin-stalegreen@0.1.0": "dsh-plugin-stalegreen@0.1.0.patch",
+    "dsh-session-retry@0.3.0": "dsh-session-retry@0.3.0.patch",
+    "dsh-swarm-orchestrator@0.6.34": "dsh-swarm-orchestrator@0.6.34.patch",
+    "dsh-task-reliability@0.4.11": "dsh-task-reliability@0.4.11.patch",
+    "dsh-verify-judge@0.2.0": "dsh-verify-judge@0.2.0.patch",
+}
+
+# The TUI bundle switches off tools this runtime does not ship, so its rows
+# target entries that do not exist. The patch applies only to the profiles that
+# boot the TUI, because pnpm rejects a patch for a package a profile does not
+# install.
+TUI_PATCHES = {
+    "@deepseek-harness-tui/dsh-tui@0.20.1": "@deepseek-harness-tui__dsh-tui@0.20.1.patch",
+}
+
+
+def build_workspace_yaml(name: str) -> str:
+    """The profile's pnpm workspace: runtime packages linked to the fork."""
+    lines = [
+        "packages:",
+        "  - .",
+        "nodeLinker: hoisted",
+        "autoInstallPeers: false",
+        "minimumReleaseAgeExclude:",
+        "  - '@deepseek-harness-tui/dsh-tui@0.20.1'",
+        "  - dsh-swarm-orchestrator@0.6.34",
+        "  - '@goodandready/dsh-russian-lang@0.4.27'",
+        "  - dsh-auto-review@0.15.1",
+        "# The fork owns the DSH runtime packages: a plugin that resolves the npm",
+        "# copy shadows the fork's runtime with an older release.",
+        "overrides:",
+    ]
+    for package, relative in sorted(RUNTIME_PACKAGES.items()):
+        lines.append(f"  '{package}': 'link:{os.path.join(REPO_ROOT, relative)}'")
+    for package, relative in sorted(VENDOR_PACKAGES.items()):
+        lines.append(f"  '{package}': 'link:{os.path.join(REPO_ROOT, relative)}'")
+    lines.append("")
+    lines.append("# Third-party plugins that still call APIs this runtime removed.")
+    lines.append("patchedDependencies:")
+    patches = dict(PROFILE_PATCHES)
+    if PROFILES_SPEC[name]["app"] == "@deepseek-harness-tui/dsh-tui":
+        patches.update(TUI_PATCHES)
+    for package, patch in sorted(patches.items()):
+        lines.append(f"  '{package}': patches/{patch}")
+    return "\n".join(lines) + "\n"
+
+
+def copy_profile_files(name):
+    """Copy the fork's profile-owned files into a generated profile."""
+    directory = os.path.join(PROFILES, name)
+    # The workspace file carries absolute links into the fork, so it is
+    # generated here instead of copied from the template.
+    workspace = os.path.join(directory, "pnpm-workspace.yaml")
+    tmp = workspace + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(build_workspace_yaml(name))
+    os.replace(tmp, workspace)
+    for filename in ("compatibility.json",):
+        source = os.path.join(TEMPLATE, filename)
+        target = os.path.join(directory, filename)
+        if os.path.exists(source):
+            shutil.copy2(source, target)
+    patches_src = os.path.join(TEMPLATE, "patches")
+    patches_dst = os.path.join(directory, "patches")
+    if os.path.isdir(patches_src):
+        shutil.rmtree(patches_dst, ignore_errors=True)
+        shutil.copytree(patches_src, patches_dst)
+
+
+def write_profile(name):
+    spec = PROFILES_SPEC[name]
+    directory = os.path.join(PROFILES, name)
+    os.makedirs(directory, exist_ok=True)
+
+    deps = dict(PLUGIN_DEPS)
+    deps.update(EXTRA_DEPS.get(name, {}))
+    deps.update(local_runtime())
+    if spec["app_dep"]:
+        deps[spec["app_dep"][0]] = spec["app_dep"][1]
+    bundles = ["@deepseek-ai/dsh-base", spec["app"]] + PLUGIN_BUNDLES
+    manifest = {
+        "name": f"dsh-profile-{name}",
+        "private": True,
+        "dependencies": deps,
+        "dsh": {"profile": {"bundles": bundles}},
+    }
+    with open(os.path.join(directory, "package.json"), "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+
+    patch_text = build_patch(spec, spec["store"], name)
+    if len(patch_text) < 1000:
+        raise SystemExit(f"refusing to write a truncated patch file for {name}")
+    patch_path = os.path.join(directory, "cordis.patch.yml")
+    tmp_path = patch_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        fh.write(patch_text)
+    os.replace(tmp_path, patch_path)
+
+    copy_profile_files(name)
+
+    patches_src = os.path.join(TEMPLATE, "patches")
+    patches_dst = os.path.join(directory, "patches")
+    if os.path.isdir(patches_src):
+        if os.path.realpath(patches_src) != os.path.realpath(patches_dst):
+            shutil.rmtree(patches_dst, ignore_errors=True)
+            shutil.copytree(patches_src, patches_dst)
+
+    print(f"== {name}: manifest written")
+
+
+def install(name):
+    directory = os.path.join(PROFILES, name)
+    # The profile uses `nodeLinker: hoisted`, so a `file:` dependency is
+    # COPIED into node_modules, not linked. pnpm skips a copy whose version
+    # matches, so a changed local plugin would never reach the profile.
+    # Dropping the copied directory forces a fresh copy on install.
+    for package in ("dsh-local-ru", "dsh-swarm-worktree", "dsh-swarm-autonomy-guard",
+                    "dsh-subagent-compat"):
+        shutil.rmtree(os.path.join(directory, "node_modules", package), ignore_errors=True)
+    result = subprocess.run(["pnpm", "install", "--prefer-offline"], cwd=directory,
+                            capture_output=True, text=True, timeout=1800)
+    tail = (result.stdout or result.stderr).strip().splitlines()[-3:]
+    print(f"== {name}: pnpm install rc={result.returncode} :: " + " | ".join(tail))
+
+
+def main():
+    names = sys.argv[1:] or list(PROFILES_SPEC)
+    for name in names:
+        if name not in PROFILES_SPEC:
+            print(f"unknown profile {name}")
+            continue
+        write_profile(name)
+        install(name)
+        # `pnpm install` runs the plugin manager, which rewrites the profile's
+        # compatibility file with the exemptions it knows about. The fork's
+        # exemptions are re-applied afterwards, so the installed plugin set
+        # keeps loading on this runtime.
+        copy_profile_files(name)
+    # The installed plugin copies are patched after every install: the swarm
+    # tool has to be allowed to dispatch itself for complex work.
+    subprocess.run([os.path.join(SCRIPT_DIR, "dsh-swarm-autonomy")], check=False)
+    # Every swarm storage gets a duty table pinned to a working model.
+    subprocess.run([os.path.join(SCRIPT_DIR, "dsh-duty-table")], check=False)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,21 @@
+diff --git a/lib/index.js b/lib/index.js
+index 752729f..09205c3 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -49,6 +49,7 @@ import { homedir } from 'node:os';
+ import { loadStore, saveStore, saveStoreSync, drainStoreWrites, pruneQuestions } from './store.js';
+ import { resumeActiveTasks, runWatchdog } from './verify.js';
+ import { registerListeners } from './events.js';
++import { Context } from '@deepseek-ai/cordis';
+ import { createApi } from './api.js';
+ import { registerTaskCommand } from './command.js';
+ import { createTrustFence, currentProfile, patchFileOf, writePatchConfig } from 'dsh-shared';
+@@ -228,7 +229,7 @@ function createShared(ctx, options) {
+  */
+ const rootRoutes = new WeakMap();
+ function registerApi(ctx, shared) {
+-    const listenCtx = ctx.root ?? ctx;
++    const listenCtx = ctx[Context.root] ?? ctx;
+     const webServer = ctx.webServer ?? listenCtx.webServer;
+     if (webServer === undefined)
+         return;

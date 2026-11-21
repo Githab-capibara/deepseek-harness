@@ -1,0 +1,32 @@
+packages:
+  - .
+
+nodeLinker: hoisted
+autoInstallPeers: false
+minimumReleaseAgeExclude:
+  - '@deepseek-harness-tui/dsh-tui@0.19.0'
+  - dsh-swarm-orchestrator@0.6.34
+  - '@goodandready/dsh-russian-lang@0.4.27'
+  - dsh-auto-review@0.15.1
+
+# Align every profile-local copy of the DSH runtime packages with the running
+# harness (0.2.2-rc.3). Without this, plugins that declare old runtime deps
+# (dsh-git-worktree -> @deepseek-ai/dsh-* 0.1.7-rc.2) would shadow the host
+# packages in the profile's node_modules and break the session.
+overrides:
+  '@deepseek-ai/dsh-agent': 0.2.2-rc.3
+  '@deepseek-ai/dsh-brand': 0.2.2-rc.3
+  '@deepseek-ai/dsh-chunked-list': 0.2.2-rc.3
+  '@deepseek-ai/dsh-llm': 0.2.2-rc.3
+  '@deepseek-ai/dsh-subagent': 0.2.2-rc.3
+  '@deepseek-ai/dsh-timeout': 0.2.2-rc.3
+  '@deepseek-ai/dsh-tools': 0.2.2-rc.3
+  '@deepseek-ai/dsh-typert-protocol': 0.2.2-rc.3
+  '@deepseek-ai/dsh-util-crypto': 0.2.2-rc.3
+  '@deepseek-ai/dsh-util-values': 0.2.2-rc.3
+
+patchedDependencies:
+  '@doiiarx/dsh-todo-continuation@0.1.0': patches/@doiiarx__dsh-todo-continuation@0.1.0.patch
+  dsh-plugin-stalegreen@0.1.0: patches/dsh-plugin-stalegreen@0.1.0.patch
+  dsh-swarm-orchestrator@0.6.34: patches/dsh-swarm-orchestrator@0.6.34.patch
+  dsh-verify-judge@0.2.0: patches/dsh-verify-judge@0.2.0.patch

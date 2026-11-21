@@ -1,0 +1,11 @@
+{
+    "dsh-ultracode@1.0.0": [
+        "0.2.2-rc.3"
+    ],
+    "dsh-worktree@0.1.0": [
+        "0.2.2-rc.3"
+    ],
+    "dsh-git-worktree@0.2.0": [
+        "0.2.2-rc.3"
+    ]
+}

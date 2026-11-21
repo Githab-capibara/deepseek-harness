@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Regenerate the profile patch files from the installed plugin sources.
+
+Each patch adapts one third-party plugin to the runtime this fork runs. The
+patch is produced with `git diff` so the hunk headers always match the file
+the profile installs.
+"""
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ECOSYSTEM_DIR = os.path.dirname(SCRIPT_DIR)
+REPO_ROOT = os.path.dirname(ECOSYSTEM_DIR)
+PATCH_DIR = os.path.join(ECOSYSTEM_DIR, 'profiles', 'ultracode', 'patches')
+PROFILE_MODULES = os.path.join(os.environ.get('DSH_HOME', '/home/d/.dsh'), 'profiles', 'web', 'node_modules')
+
+# Plugins published from a repository only; the patch source is their checkout.
+PLUGIN_REPOSITORIES = {
+    '@doiiarx/dsh-todo-continuation': 'https://github.com/DoiiarX/dsh-todo-continuation',
+}
+
+
+def pristine_source(package: str, file: str) -> str:
+    """The unpatched plugin file, read from the npm tarball or its repository.
+
+    The profile's own copy is already patched, so regenerating from it would
+    produce a patch against the patched source.
+    """
+    with tempfile.TemporaryDirectory() as work:
+        packed = subprocess.run(
+            ['npm', 'pack', package, '--pack-destination', work],
+            capture_output=True, text=True, timeout=900,
+        )
+        if packed.returncode == 0:
+            tarball = os.path.join(work, packed.stdout.strip().splitlines()[-1])
+            subprocess.run(['tar', '-xzf', tarball, '-C', work], check=True)
+            path = os.path.join(work, 'package', file)
+            if not os.path.exists(path):
+                raise SystemExit(f'plugin file not found in tarball: {package}/{file}')
+            with open(path, encoding='utf-8') as fh:
+                return fh.read()
+        # The plugin is published from a repository only; clone it and read the
+        # file from the checkout.
+        repository = PLUGIN_REPOSITORIES.get(package)
+        if repository is None:
+            raise SystemExit(f'{package}: not on npm and no repository is known')
+        checkout = os.path.join(work, 'checkout')
+        subprocess.run(['git', 'clone', '--depth', '1', '-q', repository, checkout], check=True)
+        path = os.path.join(checkout, file)
+        if not os.path.exists(path):
+            raise SystemExit(f'plugin file not found in repository: {package}/{file}')
+        with open(path, encoding='utf-8') as fh:
+            return fh.read()
+
+
+def patch_source(package: str, file: str, replacements: list[tuple[str, str]], out_name: str) -> None:
+    """Produce one patch file from a copy of the pristine plugin source."""
+    source = pristine_source(package, file)
+    with tempfile.TemporaryDirectory() as work:
+        repo = os.path.join(work, 'repo')
+        os.makedirs(repo)
+        target = os.path.join(repo, file)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, 'w', encoding='utf-8') as fh:
+            fh.write(source)
+        subprocess.run(['git', 'init', '-q'], cwd=repo, check=True)
+        subprocess.run(['git', 'add', '-A'], cwd=repo, check=True)
+        subprocess.run(['git', '-c', 'user.name=patch', '-c', 'user.email=patch@local',
+                        'commit', '-qm', 'base'], cwd=repo, check=True)
+        with open(target, encoding='utf-8') as fh:
+            text = fh.read()
+        for old, new in replacements:
+            if old not in text:
+                raise SystemExit(f'{package}: pattern not found: {old}')
+            text = text.replace(old, new)
+        with open(target, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+        diff = subprocess.run(
+            ['git', 'diff', '--src-prefix=a/', '--dst-prefix=b/'],
+            cwd=repo, check=True, capture_output=True, text=True,
+        ).stdout
+        if not diff.strip():
+            raise SystemExit(f'{package}: patch is empty')
+        out = os.path.join(PATCH_DIR, out_name)
+        with open(out, 'w', encoding='utf-8') as fh:
+            fh.write(diff)
+        print(f'wrote {out_name}')
+
+
+def main() -> int:
+    os.makedirs(PATCH_DIR, exist_ok=True)
+    patch_source(
+        'dsh-session-retry', 'lib/index.js',
+        [('.agents.roots()', '.agents.list()')],
+        'dsh-session-retry@0.3.0.patch',
+    )
+    patch_source(
+        'dsh-task-reliability', 'lib/index.js',
+        [('import { registerListeners } from \'./events.js\';',
+          "import { registerListeners } from './events.js';\nimport { Context } from '@deepseek-ai/cordis';"),
+         ('const listenCtx = ctx.root ?? ctx;', 'const listenCtx = ctx[Context.root] ?? ctx;')],
+        'dsh-task-reliability@0.4.11.patch',
+    )
+    patch_source(
+        '@deepseek-harness-tui/dsh-tui', 'cordis.patch.yml',
+        # This runtime ships neither tool, so the rows that switch them off
+        # target entries that do not exist and the harness warns on every boot.
+        [('- id: tool-ralph\n  disabled: true\n\n', ''),
+         ('- id: tool-subagent-list-agents\n  disabled: true\n', '')],
+        '@deepseek-harness-tui__dsh-tui@0.20.1.patch',
+    )
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

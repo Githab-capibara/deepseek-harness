@@ -6,6 +6,13 @@ apps/desktop/*.p12
 node_modules/
 lib/
 *.tsbuildinfo
+# Local ecosystem plugins ship hand-written source in lib/, which the blanket
+# lib/ rule above would otherwise swallow.
+!ecosystem/plugins/*/lib/**
+!ecosystem/plugins/*/lib/
+# Byte-compiled operator scripts are build residue, not sources.
+ecosystem/scripts/__pycache__/
+.agents/**/__pycache__/
 pnpm-debug.log
 .pnpm-store/
 .cache/
@@ -47,6 +54,10 @@ apps/cli/docs/
 .worktrees/
 worktrees/
 .agents/worktrees/
+# Run residue of the operator swarm checks: the repository a swarm task drives
+# and the swarm store it leaves behind.
+ecosystem-check/
+.dsh-swarm/
 .typert-*/
 native/system/test/bin/
 

@@ -169,6 +169,20 @@ describe('TokenMeter pricing', () => {
     expect(service.estimateMessage(textMessage('abcd'))).toBe(9)
   })
 
+  it('adds the decoration overhead reported by the optional decoration provider', () => {
+    const ctx = new Context()
+    new SessionProjectionRegistry(ctx)
+    ctx.provide('modelMessageDecoration', {
+      decorate: (_session: Session, messages: readonly Message[]) => messages,
+      tokenOverhead: (_session: Session) => 64,
+    })
+    const service = new TokenMeter(ctx, {})
+    const session = Session.create(brandString<SessionId>('decorated'))
+    const result = service.measure(session)
+    expect(result.decorationOverheadTokens).toBe(64)
+    expect(result.totalTokens).toBe(64)
+  })
+
   it('returns a detached deeply immutable empty measurement', () => {
     const service = meter()
     const session = Session.create(brandString<SessionId>('empty'))
@@ -177,6 +191,7 @@ describe('TokenMeter pricing', () => {
       logRevision: 0,
       baseline: { kind: 'none', tokens: 0 },
       surfaceDeltaTokens: 0,
+      decorationOverheadTokens: 0,
       totalTokens: 0,
       surfaceTokens: 0,
       nodes: [],

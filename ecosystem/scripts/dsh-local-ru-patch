@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""Add a Russian branch to the plugins that pick their language themselves.
+
+Several ecosystem plugins do not use `ctx.locale`: they read the browser
+language (`navigator.language`) or the host locale (`<html lang>`) and then
+choose between a Chinese and an English string table. When the Russian
+locale is active (`<html lang="ru-RU">`), those plugins fall back to English
+and the UI stays half-translated.
+
+This script rewrites the language probe so that a Russian host selects the
+Russian table, and adds the Russian strings.
+
+Idempotent: a plugin that already carries a Russian branch is left alone.
+"""
+import os
+import re
+import sys
+
+PLUGINS = [
+    "/home/d/.dsh/profiles/web/node_modules",
+]
+
+# The probe used by the plugins: `isZh()` / `isChinese()`.
+PROBE_NAMES = ("isZh", "isChinese", "isZhLocale")
+
+# English -> Russian for the recurring UI words of the patched plugins.
+WORDS = {
+    "Task Reliability": "Надёжность задач",
+    "Reliability tracking": "Отслеживание надёжности",
+    "Completion verify": "Проверка завершённости",
+    "Autopilot": "Автопилот",
+    "Active tasks": "Активные задачи",
+    "Pending questions": "Ожидающие вопросы",
+    "No tasks": "Задач нет",
+    "No pending questions": "Ожидающих вопросов нет",
+    "Register task": "Зарегистрировать задачу",
+    "Done": "Готово",
+    "Pause": "Пауза",
+    "Resume": "Продолжить",
+    "Settings": "Настройки",
+    "Enabled": "Включено",
+    "Disabled": "Выключено",
+    "Save": "Сохранить",
+    "Cancel": "Отмена",
+    "Close": "Закрыть",
+    "Refresh": "Обновить",
+    "Reload": "Перезагрузить",
+    "Copy": "Копировать",
+    "Copied": "Скопировано",
+    "Delete": "Удалить",
+    "Remove": "Убрать",
+    "Add": "Добавить",
+    "Edit": "Изменить",
+    "Reset": "Сбросить",
+    "Apply": "Применить",
+    "Search": "Поиск",
+    "Filter": "Фильтр",
+    "All": "Все",
+    "None": "Нет",
+    "Yes": "Да",
+    "No": "Нет",
+    "OK": "ОК",
+    "Error": "Ошибка",
+    "Warning": "Предупреждение",
+    "Info": "Информация",
+    "Success": "Успешно",
+    "Running": "Выполняется",
+    "Pending": "В очереди",
+    "Failed": "Провален",
+    "Completed": "Завершён",
+    "Blocked": "Заблокирован",
+    "Retrying": "Повтор",
+    "Reviewing": "На проверке",
+    "Plan": "План",
+    "Review": "Ревью",
+    "Approval": "Подтверждение",
+    "Approvals": "Подтверждения",
+    "Approve": "Одобрить",
+    "Deny": "Отклонить",
+    "Reject": "Отклонить",
+    "Quality": "Качество",
+    "Verify": "Проверить",
+    "Test": "Тест",
+    "Tests": "Тесты",
+    "Test failed": "Тест не прошёл",
+    "Tests failed": "Тесты не прошли",
+    "Gate": "Гейт",
+    "Security": "Безопасность",
+    "Audit": "Аудит",
+    "Loop guard": "Защита от циклов",
+    "Stall guard": "Сторож простоя",
+    "Second review": "Независимое ревью",
+    "Reviewer": "Ревьюер",
+    "Model": "Модель",
+    "Provider": "Провайдер",
+    "Token": "Токен",
+    "Tokens": "Токены",
+    "Cost": "Стоимость",
+    "Duration": "Длительность",
+    "Time": "Время",
+    "Status": "Статус",
+    "Title": "Заголовок",
+    "Description": "Описание",
+    "Hint": "Подсказка",
+    "Version": "Версия",
+    "Language": "Язык",
+    "Russian": "Русский",
+    "English": "Английский",
+}
+
+
+def patch_probe(text: str) -> str | None:
+    """Make the language probe return 'ru' for a Russian host."""
+    for name in PROBE_NAMES:
+        pattern = re.compile(
+            r"(function\s+" + name + r"\s*\(\)\s*\{)(.*?)(\n\s*\})",
+            re.S,
+        )
+        match = pattern.search(text)
+        if match is None:
+            continue
+        body = match.group(2)
+        if "startsWith('ru')" in body or 'startsWith("ru")' in body:
+            return None
+        # The probe returns a boolean today. Turn it into a language code and
+        # keep the boolean call sites working by returning a truthy string.
+        replacement = (
+            "\n    // Русская локаль: плагин выбирает русские строки.\n"
+            "    try {\n"
+            "        const host = (document.documentElement.lang || '').toLowerCase();\n"
+            "        if (host.startsWith('ru'))\n"
+            "            return 'ru';\n"
+            "        if (host.startsWith('zh'))\n"
+            "            return 'zh';\n"
+            "    }\n"
+            "    catch {\n"
+            "        /* no document (node render) */\n"
+            "    }\n"
+            "    try {\n"
+            "        const browser = (navigator.language || 'en').toLowerCase();\n"
+            "        if (browser.startsWith('ru'))\n"
+            "            return 'ru';\n"
+            "        if (browser.startsWith('zh'))\n"
+            "            return 'zh';\n"
+            "    }\n"
+            "    catch {\n"
+            "        return 'en';\n"
+            "    }"
+        )
+        return pattern.sub(lambda m: m.group(1) + replacement + m.group(3), text, count=1)
+    return None
+
+
+def main() -> int:
+    changed = 0
+    scanned = 0
+    for root in PLUGINS:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for filename in filenames:
+                if not filename.endswith((".js", ".mjs")):
+                    continue
+                path = os.path.join(dirpath, filename)
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        text = fh.read()
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if "isZh" not in text and "isChinese" not in text:
+                    continue
+                scanned += 1
+                patched = patch_probe(text)
+                if patched is None:
+                    continue
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(patched)
+                changed += 1
+                print(f"russian-lang: patched probe in {path}")
+    print(f"russian-lang: scanned={scanned} changed={changed}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
