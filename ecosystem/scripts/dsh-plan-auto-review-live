@@ -1,0 +1,68 @@
+"""Drive one plan review through the harness and report who decided it.
+
+Plan mode asks the human to approve a plan: `exit_plan_mode` sends the plan
+through `ctx.userQuestions` and waits. The plan auto-review plugin claims that
+request before the UI does and answers it with a reviewer's verdict, so the
+phases switch on their own.
+
+The check runs a task that asks for a plan, and reads the session log for the
+plugin's verdict. It passes when the plugin decided the plan, and fails when
+the request was left pending for the human.
+
+Usage:
+    ecosystem/scripts/dsh-plan-auto-review-live [task]
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+CLI = os.path.join(REPO, 'apps', 'cli', 'lib', 'bin.js')
+MODEL_PATCH = os.path.join(REPO, 'ecosystem', 'ecosystem-check-model.yml')
+LOG = '/tmp/opencode/plan-live.log'
+
+TASK = (
+    'Составь план и проведи его через exit_plan_mode: добавь в этот '
+    'репозиторий файл ecosystem-check/plan-demo.md с разделами «Цель», '
+    '«Шаги» и «Проверка». Плану нужно решение, а не реализация.'
+)
+
+
+def main() -> int:
+    task = ' '.join(sys.argv[1:]) or TASK
+    result = subprocess.run(
+        ['node', CLI, '--profile', 'headless', '--patch', MODEL_PATCH, task],
+        capture_output=True, text=True, timeout=1800, cwd=REPO,
+    )
+    output = result.stdout + result.stderr
+    with open(LOG, 'w', encoding='utf-8') as fh:
+        fh.write(output)
+
+    print(f'exit code: {result.returncode}')
+    reviewer = [line for line in output.splitlines() if 'plan-auto-review' in line]
+    print(f'plugin lines: {len(reviewer)}')
+    for line in reviewer[:8]:
+        print(f'  {line.strip()[:170]}')
+    print(f'exit_plan_mode mentions: {len(re.findall("exit_plan_mode", output))}')
+
+    approved = any('approved the plan' in line for line in reviewer)
+    rejected = any('rejected the plan' in line for line in reviewer)
+    human = any('human decides' in line for line in reviewer)
+    print(f'\napproved: {approved}')
+    print(f'rejected: {rejected}')
+    print(f'left to the human: {human}')
+
+    if not reviewer:
+        print('FAIL: the plugin reported nothing')
+        return 1
+    if not approved and not rejected:
+        print('FAIL: the plugin neither approved nor rejected a plan')
+        return 1
+    print('OK: the reviewer agent decided the plan')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

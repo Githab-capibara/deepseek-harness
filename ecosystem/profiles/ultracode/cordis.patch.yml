@@ -262,6 +262,13 @@
 
 # ── 6. Task reliability: survive flaky providers and restarts ───────
 - id: task-reliability
+  # The plugin declares `inject: ['webServer']` because it serves its API
+  # there, but the web server only exists in the web and desktop profiles.
+  # Without this the plugin stays pending in the TUI and headless profiles,
+  # and every guard it owns — the loop limit, the stall timeout, the
+  # no-progress break and the truncation rescue — is dead exactly where a
+  # long turn would need it. The plugin returns early when the service is
+  # absent, so dropping the requirement costs nothing.
   config:
     retryMax: 5
     retryBaseMs: 5000

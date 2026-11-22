@@ -76,6 +76,11 @@ PLUGIN_DEPS = {
     "dsh-git-worktree": "github:KHG420/git-worktree",
     "dsh-gitnexus-plugin": "github:akash-digitavision/dsh-gitnexus-plugin",
     "dsh-context-decay": "github:LDyty/dsh-context-decay",
+    # dsh-harden ловит «тихую» остановку: ход, который выдал только
+    # reasoning без ответа и без вызова инструмента, проглоченную ошибку
+    # инструмента и исчерпанный бюджет сетевых повторов. Без него агент
+    # выглядит как «подумал и завершился», хотя ничего не сделал.
+    "dsh-harden": "^0.1.2",
     "dsh-plugin-stalegreen": "^0.1.0",
     "dsh-protect-tests": "^0.2.3",
     "dsh-subagent-guard": "github:NightPainters/dsh-subagent-guard",
@@ -89,6 +94,10 @@ PLUGIN_DEPS = {
     "dsh-subagent-compat": local_plugin("dsh-subagent-compat"),
     "dsh-swarm-autonomy-guard": local_plugin("dsh-swarm-autonomy-guard"),
     "dsh-swarm-worktree": local_plugin("dsh-swarm-worktree"),
+    # dsh-plan-auto-review: a reviewer agent decides the plan, so plan mode
+    # advances without a human click. The reviewer answers approve or reject
+    # with its reasons, and the rejected plan comes back with the reasons.
+    "dsh-plan-auto-review": local_plugin("dsh-plan-auto-review"),
     # ── Надёжность и безопасность (см. анализ траектории) ──────────────
     # dsh-agent-loop-guard: рвёт dedup-циклы повторных tool-вызовов
     #   (в траектории: 11 одинаковых read models.rs подряд).
@@ -123,6 +132,7 @@ PLUGIN_DEPS = {
 PLUGIN_BUNDLES = [
     "dsh-swarm-orchestrator",
     "dsh-task-reliability",
+    "dsh-harden",
     "dsh-protect-tests",
     "dsh-plugin-stalegreen",
     "dsh-subagent-guard",
@@ -136,6 +146,7 @@ PLUGIN_BUNDLES = [
     "dsh-context-decay",
     "dsh-swarm-autonomy-guard",
     "dsh-swarm-worktree",
+    "dsh-plan-auto-review",
     "@goodandready/dsh-agent-loop-guard",
     "dsh-baseline",
     "dsh-auto-review",
@@ -250,9 +261,17 @@ RUNTIME_PACKAGES = {
     "@deepseek-ai/dsh-chunked-list": "packages/util/chunked-list",
     "@deepseek-ai/dsh-client-locale": "packages/client/locale",
     "@deepseek-ai/dsh-commands": "packages/interaction/commands",
+    # The plugins that guard a run peer-depend on these: dsh-harden on the
+    # sandbox, the compaction, the jobs and the shell. Without the links they
+    # cannot be imported, and the plugin stays inactive.
+    "@deepseek-ai/dsh-compaction": "packages/compaction/compaction",
     "@deepseek-ai/dsh-home-paths": "packages/util/home-paths",
+    "@deepseek-ai/dsh-jobs": "packages/jobs/jobs",
     "@deepseek-ai/dsh-llm": "packages/llm/llm",
+    "@deepseek-ai/dsh-sandbox": "packages/sandbox/sandbox",
     "@deepseek-ai/dsh-session": "packages/core/session",
+    "@deepseek-ai/dsh-settings": "packages/settings/settings",
+    "@deepseek-ai/dsh-shell": "packages/shell/shell",
     "@deepseek-ai/dsh-subagent": "packages/subagent/subagent",
     "@deepseek-ai/dsh-system-prompt": "packages/core/system-prompt",
     "@deepseek-ai/dsh-timeout": "packages/util/timeout",
@@ -269,6 +288,7 @@ PROFILE_PATCHES = {
     "dsh-plugin-stalegreen@0.1.0": "dsh-plugin-stalegreen@0.1.0.patch",
     "dsh-session-retry@0.3.0": "dsh-session-retry@0.3.0.patch",
     "dsh-swarm-orchestrator@0.6.34": "dsh-swarm-orchestrator@0.6.34.patch",
+    "dsh-second-review@1.3.6": "dsh-second-review@1.3.6.patch",
     "dsh-task-reliability@0.4.11": "dsh-task-reliability@0.4.11.patch",
     "dsh-verify-judge@0.2.0": "dsh-verify-judge@0.2.0.patch",
 }
@@ -384,7 +404,7 @@ def install(name):
     # matches, so a changed local plugin would never reach the profile.
     # Dropping the copied directory forces a fresh copy on install.
     for package in ("dsh-local-ru", "dsh-swarm-worktree", "dsh-swarm-autonomy-guard",
-                    "dsh-subagent-compat"):
+                    "dsh-subagent-compat", "dsh-plan-auto-review"):
         shutil.rmtree(os.path.join(directory, "node_modules", package), ignore_errors=True)
     result = subprocess.run(["pnpm", "install", "--prefer-offline"], cwd=directory,
                             capture_output=True, text=True, timeout=1800)
