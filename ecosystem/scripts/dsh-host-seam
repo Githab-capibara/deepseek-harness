@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""Add the `modelMessageDecoration` seam to the installed DSH runtime.
+
+Upstream DSH 0.2.2-rc.1 has no seam for changing the messages sent to the
+model. `dsh-context-decay` (https://github.com/LDyty/dsh-context-decay) needs
+exactly that seam, and its own repository ships the upstream-style patch for
+the *source* tree (packages/core/agent-loop, packages/llm/token-meter).
+
+We do not rebuild the whole harness from source: the released runtime is
+already installed as compiled JavaScript, and the seam is three call sites.
+This script applies the equivalent change to the installed packages:
+
+  1. dsh-agent-loop:  request assembly calls `decorate(session, messages)`
+                      right before the request is frozen,
+  2. dsh-agent-loop:  the assistant reply is passed through
+                      `sanitizeAssistantMessage(session, message)` before it is
+                      committed to the session log,
+  3. dsh-token-meter: `tokenOverhead(session)` joins the heuristic baseline and
+                      the measurement reports `decorationOverheadTokens`.
+
+The script is idempotent: it detects its own marker and does nothing when the
+seam is already present. Re-run it after any `npm i -g @deepseek-ai/dsh`
+upgrade (the web unit calls it through ExecStartPre).
+"""
+import os
+import subprocess
+import sys
+
+MARKER = "dsh-host-seam"
+
+AGENT_OLD_1 = (
+    "\t\tconst boundaryMessages = session.deriveMessages();\n"
+    "\t\tfor (const message of boundaryMessages) {\n"
+    "\t\t\tif (this.frozenMessages.has(message)) continue;\n"
+    "\t\t\tdeepFreeze(message);\n"
+    "\t\t\tthis.frozenMessages.add(message);\n"
+    "\t\t}\n"
+    "\t\tObject.freeze(boundaryMessages);\n"
+    "\t\treturn markAgentLoopRequest(Object.freeze({\n"
+    "\t\t\t...header.config,\n"
+    "\t\t\tmessages: boundaryMessages,\n"
+)
+AGENT_NEW_1 = (
+    "\t\tconst boundaryMessages = session.deriveMessages();\n"
+    "\t\t/* dsh-host-seam: optional request-message decoration (modelMessageDecoration). */\n"
+    "\t\tconst decoration = this.loopCtx.get(\"modelMessageDecoration\");\n"
+    "\t\tconst requestMessages = decoration === undefined\n"
+    "\t\t\t? boundaryMessages\n"
+    "\t\t\t: decoration.decorate(this.session, boundaryMessages);\n"
+    "\t\tfor (const message of requestMessages) {\n"
+    "\t\t\tif (this.frozenMessages.has(message)) continue;\n"
+    "\t\t\tdeepFreeze(message);\n"
+    "\t\t\tthis.frozenMessages.add(message);\n"
+    "\t\t}\n"
+    "\t\tObject.freeze(requestMessages);\n"
+    "\t\treturn markAgentLoopRequest(Object.freeze({\n"
+    "\t\t\t...header.config,\n"
+    "\t\t\tmessages: requestMessages,\n"
+)
+
+AGENT_OLD_2 = (
+    "\t\t\t\t\t\t\tmessage: createAssistantMessage({\n"
+    "\t\t\t\t\t\t\t\tcontent,\n"
+    "\t\t\t\t\t\t\t\tsource: {\n"
+    "\t\t\t\t\t\t\t\t\tprovider: request.provider,\n"
+    "\t\t\t\t\t\t\t\t\tmodel: request.model,\n"
+    "\t\t\t\t\t\t\t\t\t...live.replayState === void 0 ? {} : { replayState: live.replayState }\n"
+    "\t\t\t\t\t\t\t\t}\n"
+    "\t\t\t\t\t\t\t}),\n"
+)
+AGENT_NEW_2 = (
+    "\t\t\t\t\t\t\tmessage: dshHostSeamSanitize(this.loopCtx, this.session, createAssistantMessage({\n"
+    "\t\t\t\t\t\t\t\tcontent,\n"
+    "\t\t\t\t\t\t\t\tsource: {\n"
+    "\t\t\t\t\t\t\t\t\tprovider: request.provider,\n"
+    "\t\t\t\t\t\t\t\t\tmodel: request.model,\n"
+    "\t\t\t\t\t\t\t\t\t...live.replayState === void 0 ? {} : { replayState: live.replayState }\n"
+    "\t\t\t\t\t\t\t\t}\n"
+    "\t\t\t\t\t\t\t})),\n"
+)
+
+AGENT_OLD_3 = (
+    "\t\t\t\tlive.settle(\"assistant/message\", () => this.session.append(\"assistant/message\", {\n"
+    "\t\t\t\t\tturn,\n"
+    "\t\t\t\t\tstep,\n"
+    "\t\t\t\t\tmessage,\n"
+    "\t\t\t\t\t...live.usage === void 0 ? {} : { usage: live.usage },\n"
+    "\t\t\t\t\tstream: live.stream\n"
+    "\t\t\t\t}, { surfaceOp: \"append\" }).seq);\n"
+    "\t\t\t\tif (finish.kind === \"max-tokens\") return { kind: \"max-tokens\" };\n"
+    "\t\t\t\tconst toolCalls = message.content.filter((block) => block.type === \"tool-call\");\n"
+)
+AGENT_NEW_3 = (
+    "\t\t\t\tconst committed = dshHostSeamSanitize(this.loopCtx, this.session, message);\n"
+    "\t\t\t\tlive.settle(\"assistant/message\", () => this.session.append(\"assistant/message\", {\n"
+    "\t\t\t\t\tturn,\n"
+    "\t\t\t\t\tstep,\n"
+    "\t\t\t\t\tmessage: committed,\n"
+    "\t\t\t\t\t...live.usage === void 0 ? {} : { usage: live.usage },\n"
+    "\t\t\t\t\tstream: live.stream\n"
+    "\t\t\t\t}, { surfaceOp: \"append\" }).seq);\n"
+    "\t\t\t\tif (finish.kind === \"max-tokens\") return { kind: \"max-tokens\" };\n"
+    "\t\t\t\tconst toolCalls = committed.content.filter((block) => block.type === \"tool-call\");\n"
+)
+
+AGENT_HELPER = (
+    "\n/* dsh-host-seam: optional modelMessageDecoration seam (dsh-context-decay). */\n"
+    "function dshHostSeamSanitize(loopCtx, session, message) {\n"
+    "\tconst decoration = loopCtx.get(\"modelMessageDecoration\");\n"
+    "\treturn decoration?.sanitizeAssistantMessage\n"
+    "\t\t? decoration.sanitizeAssistantMessage(session, message)\n"
+    "\t\t: message;\n"
+    "}\n"
+)
+
+METER_OLD = (
+    "\t\treturn deepFreeze(structuredClone({\n"
+    "\t\t\tlogRevision: state.consumedEvents,\n"
+    "\t\t\tbaseline,\n"
+    "\t\t\tsurfaceDeltaTokens,\n"
+    "\t\t\ttotalTokens: Math.max(0, baseline.tokens + surfaceDeltaTokens),\n"
+    "\t\t\tsurfaceTokens: surface.surfaceTokens,\n"
+    "\t\t\tnodes: surface.nodes\n"
+    "\t\t}));\n"
+)
+METER_NEW = (
+    "\t\t/* dsh-host-seam: presentation-only tokens added by the decorator. */\n"
+    "\t\tconst decoration = this.ctx.get(\"modelMessageDecoration\");\n"
+    "\t\tconst decorationOverheadTokens = baseline.kind === \"usage\"\n"
+    "\t\t\t? 0\n"
+    "\t\t\t: decoration?.tokenOverhead?.(session) ?? 0;\n"
+    "\t\treturn deepFreeze(structuredClone({\n"
+    "\t\t\tlogRevision: state.consumedEvents,\n"
+    "\t\t\tbaseline,\n"
+    "\t\t\tsurfaceDeltaTokens,\n"
+    "\t\t\ttotalTokens: Math.max(0, baseline.tokens + surfaceDeltaTokens + decorationOverheadTokens),\n"
+    "\t\t\tdecorationOverheadTokens,\n"
+    "\t\t\tsurfaceTokens: surface.surfaceTokens,\n"
+    "\t\t\tnodes: surface.nodes\n"
+    "\t\t}));\n"
+)
+
+
+def runtime_roots():
+    """Every installed copy of the DSH runtime packages on this host."""
+    roots = []
+    candidates = []
+    # global npm/mise installs
+    for base in ("/home/d/.local/share/mise/installs/node",):
+        node_root = os.path.join(base)
+        if not os.path.isdir(node_root):
+            continue
+        for version in os.listdir(node_root):
+            lib = os.path.join(node_root, version, "lib", "node_modules")
+            if os.path.isdir(lib):
+                candidates.append(lib)
+    # profile-local copies (if a profile ever vendors the runtime)
+    profiles = "/home/d/.dsh/profiles"
+    if os.path.isdir(profiles):
+        for profile in os.listdir(profiles):
+            lib = os.path.join(profiles, profile, "node_modules")
+            if os.path.isdir(lib):
+                candidates.append(lib)
+    for lib in candidates:
+        for scope in ("@deepseek-ai/dsh",):
+            runtime = os.path.join(lib, scope, "node_modules", "@deepseek-ai")
+            if os.path.isdir(runtime):
+                real = os.path.realpath(runtime)
+                if real not in roots:
+                    roots.append(real)
+    return roots
+
+
+def patch_file(path, pairs, helper=None):
+    if not os.path.isfile(path):
+        return "missing"
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    if MARKER in text:
+        return "already"
+    for old, new in pairs:
+        if old not in text:
+            return "anchor-missing"
+        text = text.replace(old, new, 1)
+    if helper:
+        text += helper
+    tmp = path + ".seam.tmp.mjs"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    check = subprocess.run(["node", "--check", tmp], capture_output=True, timeout=120)
+    if check.returncode != 0:
+        os.unlink(tmp)
+        return "syntax-error: " + check.stderr.decode("utf-8", "replace")[:300]
+    os.replace(tmp, path)
+    return "patched"
+
+
+def main():
+    roots = runtime_roots()
+    if not roots:
+        print("dsh-host-seam: no DSH runtime found")
+        return 1
+    status = []
+    for root in roots:
+        agent = os.path.join(root, "dsh-agent-loop", "lib", "index.js")
+        meter = os.path.join(root, "dsh-token-meter", "lib", "index.js")
+        a = patch_file(agent, [(AGENT_OLD_1, AGENT_NEW_1),
+                               (AGENT_OLD_2, AGENT_NEW_2),
+                               (AGENT_OLD_3, AGENT_NEW_3)], AGENT_HELPER)
+        m = patch_file(meter, [(METER_OLD, METER_NEW)])
+        status.append(f"{root}: agent-loop={a} token-meter={m}")
+    for line in status:
+        print("dsh-host-seam:", line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

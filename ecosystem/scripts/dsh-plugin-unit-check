@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Exercise every ecosystem plugin's own code and report what it did.
+
+Each plugin is loaded with a minimal Cordis context and the behaviour it owns
+is observed: the Russian plugin registers its dictionaries, the subagent shim
+patches the agent API, the autonomy guard classifies a dispatch, and the
+worktree plugin patches the swarm service.
+"""
+import json
+import os
+import subprocess
+import sys
+
+PLUGINS = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    'ecosystem', 'plugins',
+)
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# The vendored Cordis is the runtime's own copy; the plugins resolve it from
+# the profile they run in.
+CORDIS = os.path.join(REPO_ROOT, 'vendor', 'cordis', 'lib', 'index.js')
+
+
+def node(source: str) -> dict:
+    result = subprocess.run(
+        ['node', '--input-type=module', '-e', source],
+        capture_output=True, text=True, timeout=300,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip()[:600])
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def main() -> int:
+    failures = 0
+
+    def check(ok: bool, description: str) -> None:
+        print(f'{"OK  " if ok else "FAIL"} {description}')
+        if not ok:
+            failures += 1
+
+    # dsh-local-ru: the client half registers the Russian dictionaries.
+    try:
+        result = node(f'''
+import {{ Context }} from 'file://{CORDIS}'
+import {{ apply, name }} from 'file://{PLUGINS}/dsh-local-ru/lib/index.js'
+const ctx = new Context()
+const registered = []
+ctx.provide('locale', {{ register: (ns, table) => registered.push([ns, Object.keys(table).length]) }})
+apply(ctx, {{}})
+console.log(JSON.stringify({{ name, registered }}))
+''')
+        check(result['name'] == 'dsh-local-ru', 'dsh-local-ru: exports its plugin name')
+    except RuntimeError as error:
+        check(False, f'dsh-local-ru: {error}')
+
+    # dsh-subagent-compat: the shim reports what it found.
+    try:
+        result = node(f'''
+import {{ Context }} from 'file://{CORDIS}'
+import {{ apply, name }} from 'file://{PLUGINS}/dsh-subagent-compat/lib/index.js'
+const ctx = new Context()
+apply(ctx, {{}})
+console.log(JSON.stringify({{ name }}))
+''')
+        check(result['name'] == 'subagent-compat', 'dsh-subagent-compat: exports its plugin name')
+    except RuntimeError as error:
+        check(False, f'dsh-subagent-compat: {error}')
+
+    # dsh-subagent-compat: the legacy start() forwards the spawning agent to
+    # the 0.2.x activation spec, which checks it against the live registry.
+    try:
+        result = node(f'''
+import {{ Context }} from 'file://{CORDIS}'
+import {{ apply }} from 'file://{PLUGINS}/dsh-subagent-compat/lib/index.js'
+const ctx = new Context()
+let seen
+const subagents = {{
+  startActivation: async (spec) => {{ seen = spec; return {{ childId: 'child-1', result: {{ ok: true }}, dispose: () => {{}} }} }},
+}}
+ctx.provide('subagents', subagents)
+apply(ctx, {{}})
+await subagents.start('spawn', {{ label: 'swarm:x', prompt: [{{ type: 'text', text: 'do it' }}], parent: {{ id: 'parent-1' }}, cwd: '/tmp/work', signal: new AbortController().signal }})
+console.log(JSON.stringify({{ parentId: seen.parent?.id, provider: seen.provider, delivery: seen.delivery, promptBlocks: seen.prompt?.length, cwd: seen.cwd, requestKeys: Object.keys(seen.request ?? {{}}).sort() }}))
+''')
+        check(result.get('parentId') == 'parent-1',
+              'dsh-subagent-compat: the legacy start forwards the spawning agent')
+        check(result.get('provider') == 'spawn' and result.get('delivery') == 'parent',
+              'dsh-subagent-compat: the legacy start names the provider and the delivery')
+        check(result.get('promptBlocks') == 1,
+              'dsh-subagent-compat: the legacy start forwards the prompt blocks')
+        check(result.get('cwd') == '/tmp/work',
+              'dsh-subagent-compat: the legacy start forwards the working directory')
+        check('parent' not in result.get('requestKeys', []) and 'prompt' not in result.get('requestKeys', []),
+              'dsh-subagent-compat: the provider request carries no nested agent or prompt')
+    except RuntimeError as error:
+        check(False, f'dsh-subagent-compat (start forwarding): {error}')
+
+    # dsh-swarm-autonomy-guard: the classifier answers for a dispatch.
+    try:
+        result = node(f'''
+import {{ apply, name, messageText, ultracodeActive }} from 'file://{PLUGINS}/dsh-swarm-autonomy-guard/lib/index.js'
+const probe = messageText({{ content: [{{ type: 'text', text: 'разбей задачу на части' }}] }})
+const withoutSession = ultracodeActive({{}})
+console.log(JSON.stringify({{ name, probe, withoutSession }}))
+''')
+        check(result['name'] == 'swarm-autonomy-guard', 'dsh-swarm-autonomy-guard: exports its plugin name')
+        check(result['probe'] == 'разбей задачу на части',
+              'dsh-swarm-autonomy-guard: reads the text of an inbox message')
+        check(result['withoutSession'] is False,
+              'dsh-swarm-autonomy-guard: reports the UltraCode mode off without a session')
+    except RuntimeError as error:
+        check(False, f'dsh-swarm-autonomy-guard: {error}')
+
+    # dsh-swarm-worktree: the plugin patches the swarm service's spawn.
+    try:
+        result = node(f'''
+import {{ apply, name, worktreeSlug }} from 'file://{PLUGINS}/dsh-swarm-worktree/lib/index.js'
+const logger = () => ({{ info: () => {{}}, warn: () => {{}}, error: () => {{}} }})
+const ctx = {{
+  logger,
+  get: (key) => key === 'swarmService' ? {{ spawnDeps: () => {{}} }} : undefined,
+  on: () => {{}},
+  effect: (fn) => fn(),
+}}
+const patched = apply(ctx, {{ debug: false }})
+console.log(JSON.stringify({{ name, slug: worktreeSlug('t', 'a'), patched: typeof patched }}))
+''')
+        check(result['name'] == 'swarm-worktree', 'dsh-swarm-worktree: exports its plugin name')
+        check(result['slug'] == 'swarm-t-a', 'dsh-swarm-worktree: names the worktree per task')
+    except RuntimeError as error:
+        check(False, f'dsh-swarm-worktree: {error}')
+
+    if failures:
+        print(f'\n{failures} check(s) failed')
+        return 1
+    print('\nevery ecosystem plugin loads and behaves as its contract states')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

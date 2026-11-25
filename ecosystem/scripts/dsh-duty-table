@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Seed every swarm storage with a working duty table.
+
+The upstream default duty table carries no provider/model, so workers fall
+back to whatever the parent session happened to use, and a model that is out
+of quota takes the whole swarm down with it. This script writes a fixed duty
+table (HNC / MiniMax-M3.1-Flash with working fallbacks) into every swarm
+storage directory used by the profiles.
+
+Idempotent: an existing valid table is left alone unless its primary model is
+not the pinned one.
+"""
+import json
+import os
+import sys
+
+# ONLY these four models may be used anywhere in the stack. `auto/*` and
+# `hnc/auto` are forbidden: an auto entry resolves to whatever upstream is
+# reachable at that moment and can silently pick a paid model.
+ALLOWED_MODELS = ("MiniMax-M3.1-Flash", "Qwen3.8-Flash-Next",
+                  "step-5-preview", "longcat-2.5")
+
+# The routes are walked in this order for every model:
+#   1. OmniRoute  (local gateway, retries + fails over upstream)
+#   2. HNC direct (api.hcnsec.cn)
+#   3. FreeLLM API (localhost:8080)
+# A direct route that answers 403 (quota wall) is walked past by the
+# orchestrator's quota failover; a route that answers 500 (no channel) is
+# walked past by the retry policy. The list repeats, so the cycle continues
+# until some route answers 200.
+PRIMARY = {"provider": "omniroute", "model": "hnc/step-5-preview"}
+
+# The provider pre-consumes credit for the whole max_tokens window before the
+# request is sent (observed: a 131k window needs ~CNY 1.6 up front, and the
+# account refused the request with only CNY 0.2 left). A modest window keeps
+# the workers inside the available credit.
+ROLE_MAX_TOKENS = 8192
+
+
+def route_chain(model, direct_name):
+    """The failover chain for one model: proxy, direct, second proxy.
+
+    The same four models are offered by every route, only the spelling of
+    the model id differs per provider. The chain repeats so the cycle
+    continues until some route answers 200.
+    """
+    return [
+        {"provider": "omniroute", "model": f"hnc/{direct_name}"},
+        {"provider": "hnc", "model": direct_name},
+        {"provider": "freellmapi", "model": direct_name.lower()},
+        {"provider": "omniroute", "model": f"hnc/{direct_name}"},
+        {"provider": "hnc", "model": direct_name},
+        {"provider": "freellmapi", "model": direct_name.lower()},
+    ]
+
+
+# The chain starts at a different allowed model per role, so parallel workers
+# do not all hammer the same upstream at the same time. Every role currently
+# starts at step-5-preview: it is the model that answers 200 through every
+# route, and the user asked for exactly this model in all tests.
+ROLE_FALLBACKS = {
+    "architect": route_chain("step-5-preview", "step-5-preview"),
+    "builder": route_chain("step-5-preview", "step-5-preview"),
+    "reviewer": route_chain("step-5-preview", "step-5-preview"),
+    "integrator": route_chain("step-5-preview", "step-5-preview"),
+}
+
+ROLE_META = {
+    "architect": ("Architect", "Decomposes work into a parallel task DAG with clear scopes.",
+                  "You are the Architect of an agent swarm. You decompose requirements into independent, well-scoped tasks with explicit dependencies. You never implement code yourself; you define task boundaries, acceptance criteria, and the integration order."),
+    "builder": ("Builder", "Implements exactly one task to completion with its own verification.",
+                "You are a Builder agent in a swarm. You implement exactly the one task you are given, completely and verifiably: read the workspace, write the code, run the checks, and finish with a concise summary of what changed and how it was verified. Stay strictly inside your task scope; other agents own everything else."),
+    "reviewer": ("Reviewer", "Reviews completed work against acceptance criteria and reports findings.",
+                 "You are a Reviewer agent in a swarm. You examine the work produced for one task against its stated scope and quality bar, verify claims by reading the actual code (never trust the summary alone), and report concrete findings: what is correct, what is missing, what must change."),
+    "integrator": ("Integrator", "Merges completed parallel work into a coherent result and verifies it.",
+                   "You are the Integrator agent of a swarm. After parallel builders finish, you reconcile their combined changes into one coherent result: resolve overlaps, fix seams between tasks, run the full verification, and report the final state."),
+}
+
+ROLE_CONCURRENCY = {"architect": 1, "builder": 4, "reviewer": 2, "integrator": 1}
+
+STORAGES = ["swarm", "swarm-tui", "swarm-tui2", "swarm-desktop", "swarm-decay",
+            "swarm-headless"]
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+HOME = os.environ.get("DSH_HOME", "/home/d/.dsh")
+BASE = os.path.join(HOME, "storages")
+
+
+def build_table():
+    roles = {}
+    for role_id, (label, description, persona) in ROLE_META.items():
+        chain = ROLE_FALLBACKS.get(role_id, [])
+        primary = chain[0] if len(chain) > 0 else dict(PRIMARY)
+        roles[role_id] = {
+            "id": role_id,
+            "label": label,
+            "description": description,
+            "provider": primary["provider"],
+            "model": primary["model"],
+            "maxTokens": ROLE_MAX_TOKENS,
+            "fallbacks": [dict(f) for f in chain],
+            "persona": persona,
+            "maxConcurrent": ROLE_CONCURRENCY.get(role_id, 2),
+        }
+    return {"version": 1, "updatedAt": int(__import__("time").time() * 1000),
+            "roles": roles}
+
+
+def expected_roles():
+    """The role -> (provider, model) pairs this script must produce."""
+    return {role_id: (chain[0]["provider"], chain[0]["model"])
+            for role_id, chain in ROLE_FALLBACKS.items()}
+
+
+def main() -> int:
+    changed = 0
+    kept = 0
+    for name in STORAGES:
+        directory = os.path.join(BASE, name)
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "duty-table.json")
+        table = None
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    table = json.load(fh)
+            except (OSError, ValueError):
+                table = None
+        expected = expected_roles()
+        if table and table.get("roles") and all(
+                role.get("provider") == expected.get(role_id, (None, None))[0]
+                and role.get("model") == expected.get(role_id, (None, None))[1]
+                and role.get("maxTokens") == ROLE_MAX_TOKENS
+                and role.get("fallbacks") == [dict(f) for f in ROLE_FALLBACKS.get(role_id, [])]
+                for role_id, role in table.get("roles", {}).items()) and len(table.get("roles", {})) == len(expected):
+            kept += 1
+            continue
+        fresh = build_table()
+        if table:
+            # keep operator edits to personas/labels, re-pin only the model
+            for role_id, role in fresh["roles"].items():
+                old = table.get("roles", {}).get(role_id)
+                if old:
+                    role["persona"] = old.get("persona", role["persona"])
+                    role["label"] = old.get("label", role["label"])
+                    role["description"] = old.get("description", role["description"])
+                    role["maxConcurrent"] = old.get("maxConcurrent", role["maxConcurrent"])
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(fresh, fh, ensure_ascii=False, indent=1)
+            fh.write("\n")
+        os.replace(tmp, path)
+        changed += 1
+        print(f"duty-table: seeded {path}")
+    print(f"duty-table: changed={changed} kept={kept}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

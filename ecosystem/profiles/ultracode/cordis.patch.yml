@@ -1,0 +1,466 @@
+# =====================================================================
+# Unified "swarm + ultracode" configuration.
+# Generated for the DSH profiles `web` and `ultracode` so that the browser
+# dashboard and the CLI/TUI surface behave identically.
+#
+# Providers (OmniRoute + HNC) live in the home-level patch
+# (~/.dsh/cordis.patch.yml) and are inherited by every profile.
+# =====================================================================
+
+# ── 1. UltraCode is the default agent working mode ─────────────────
+# The registry entry id differs per profile (web vs. tui), so this file is
+# generated per profile.
+- id: dsh-tui-agent-preset-registry
+  config:
+    default: ultracode
+
+# ── 2. The UltraCode agent preset ───────────────────────────────────
+# plan -> execute -> verify, parallel fan-out, finish with proof.
+# The compaction row carries the LATE trigger (0.92) instead of 0.8.
+- insert:
+    - id: preset-ultracode
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: ultracode
+        order: 3
+        plugins:
+                  - id: persona
+                    name: '@deepseek-ai/dsh-persona'
+                    config:
+                      prefix: >-
+                        You are a coding agent powered by the {{model}} model.
+
+                        UltraCode mode is on. UltraCode is a working mode, not just an effort level - it
+                        changes how you organize work, not only how hard you think:
+
+                        1. Think at maximum depth before acting. Analyze the problem, weigh alternatives,
+                           and then act decisively. Do not settle for the first plausible approach.
+                        2. Plan -> execute -> verify. Break non-trivial work into a plan, carry it out in
+                           verifiable steps, then verify your own work - run tests, re-read your diffs, check
+                           the acceptance criteria - before claiming success. Never declare a task done on
+                           the strength of having written code; prove it runs.
+                        3. Fan out in parallel, and know when. If the task splits into two or more
+                           independent work items (separate files, modules, subsystems, or research
+                           plus implementation), that is a complex task: dispatch a swarm of agents
+                           with swarm_dispatch - one run, one DAG of tasks - and collect it with
+                           swarm_wait. You do NOT need the human to ask for a swarm; recognising
+                           that the task is complex is your job. Work single-handed only when the
+                           task is one indivisible step. You orchestrate and verify; workers execute.
+                           Reuse existing patterns and machinery over new ones.
+                           6. Explore the CODE with the graph first. The mcp__gitnexus__* tools
+                           hold an indexed knowledge graph of the code: its files, symbols,
+                           call chains and execution flows. Before reading source files one by
+                           one, ask the graph where a symbol lives, who calls it, and which
+                           flows reach it - mcp__gitnexus__context, mcp__gitnexus__query,
+                           mcp__gitnexus__explain, mcp__gitnexus__impact. The graph indexes
+                           code, not prose: for documents, READ and GREP are the right tools.
+                           Re-reading one file for the same reason is a loop, not exploration.
+                        4. Write long, complete answers when the task warrants. Full implementations, not
+                           sketches. A verified, runnable result is the goal; truncating to save tokens is
+                           not.
+                        5. Finish with proof. State what was verified and how, so the result is
+                           trustworthy without being re-checked.
+                  - id: agent-instructions
+                    name: '@deepseek-ai/dsh-agent-instructions'
+                    config:
+                      maxBytes: 65536
+                  - id: time-context
+                    name: '@deepseek-ai/dsh-time-context'
+                  - id: tool-bash
+                    name: '@deepseek-ai/dsh-tool-bash'
+                    disabled: !!js process.platform === 'win32'
+                  - id: tool-pwsh
+                    name: '@deepseek-ai/dsh-tool-pwsh'
+                    disabled: !!js process.platform !== 'win32'
+                  - id: tool-fs
+                    name: '@deepseek-ai/dsh-tool-fs'
+                    config:
+                      # Set false to drop the apply_patch tool beside edit.
+                      applyPatch: false
+                  - id: tool-fs-search
+                    name: '@deepseek-ai/dsh-tool-fs-search'
+                    config:
+                      sampleOverCapGlobResults: false
+                  - id: tool-jobs
+                    name: '@deepseek-ai/dsh-tool-jobs'
+                  - id: tool-schedule
+                    name: '@deepseek-ai/dsh-tool-schedule'
+                  - id: skill-filesystem
+                    name: '@deepseek-ai/dsh-skill-filesystem'
+                  - id: tool-skill
+                    name: '@deepseek-ai/dsh-tool-skill'
+                  - id: command-goal
+                    name: '@deepseek-ai/dsh-command-goal'
+                  - id: tool-goal
+                    name: '@deepseek-ai/dsh-tool-goal'
+                  - id: planning
+                    name: cordis:group
+                    group: true
+                    isolate:
+                      planMode: true
+                    config:
+                      - id: plan-mode
+                        name: '@deepseek-ai/dsh-plan-mode'
+                        config:
+                          section: |
+                            You are in plan mode. Stay in plan mode until the user approves your plan through exit_plan_mode or switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+                            Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+                            The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+                            Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+                            Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+                            When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+                  # The preset's automatic compaction group is intentionally
+                  # absent: dsh-context-decay is the single context reducer in
+                  # every profile (host `compaction-basic.auto` and the in-place
+                  # surface rewriters are all off).
+                  # Two reducers must never run at the same time. The manual
+                  # `/compact` command stays available as an emergency fallback.
+                  - id: delegation
+                    name: cordis:group
+                    group: true
+                    isolate:
+                      workflowEngine: true
+                    config:
+                      - id: tool-subagent-control
+                        name: '@deepseek-ai/dsh-tool-subagent-control'
+                      - id: tool-subagent
+                        name: '@deepseek-ai/dsh-tool-subagent'
+                        config:
+                          provider: spawn
+                          toolName: subagent
+                          modelSelection: true
+                          modelDiscovery: true
+                      - id: tool-subagent-fork
+                        name: '@deepseek-ai/dsh-tool-subagent'
+                        config:
+                          provider: fork
+                          toolName: subagent_fork
+                      - id: workflow-ptc
+                        name: '@deepseek-ai/dsh-workflow-ptc'
+                        config:
+                          provider: spawn
+                      - id: tool-workflow
+                        name: '@deepseek-ai/dsh-tool-workflow'
+                  - id: tool-ask-user
+                    name: '@deepseek-ai/dsh-tool-ask-user'
+                  - id: tool-todo
+                    name: '@deepseek-ai/dsh-tool-todo'
+                    config:
+                      allowParallelInProgress: true
+                  - id: tool-web
+                    name: '@deepseek-ai/dsh-tool-web'
+                    config:
+                      fetch: true
+                      searchTimeoutMs: 60000
+                  - id: present
+                    name: '@deepseek-ai/dsh-tool-present'
+                  - id: tool-plugin-manager
+                    name: '@deepseek-ai/dsh-plugin-manager/tools'
+                    disabled: !!js "!ctx.get('profileContext')"
+                  - id: tool-plugin-market
+                    name: '@deepseek-ai/dsh-plugin-market/tools'
+                    disabled: true
+# ── 3. Swarm orchestrator ───────────────────────────────────────────
+# Our providers answer the first token in 1-3 minutes, so the swarm runs
+# small, staggered and adaptive instead of the stock 50-agent fan-out.
+#
+# The swarm event store is EXCLUSIVE: one process owns it at a time. The
+# always-on web service owns `storages/swarm` (that is the board on the
+# dashboard), so the interactive TUI profile owns its own store
+# `storages/swarm-tui` - otherwise its swarm service cannot even start
+# ("event-store ownership" conflict) and the TUI would have no swarm tools.
+# Both stores carry the same duty table, so the roles behave identically.
+- id: swarm
+  require: dsh-swarm-orchestrator
+  config:
+    storageDir: !!js dshHomePath("storages/swarm-tui")
+    maxConcurrent: 4
+    maxTotalConcurrentAgents: 12
+    adaptiveConcurrency: true
+    spawnStaggerMs: 1500
+    maxRetries: 2
+    reviewLoops: 2
+    # The architect-review task is an extra agent that plans the run before
+    # the builders start. It kept dying with provider errors (SERVER /
+    # PI_AI_ERROR) and its failure BLOCKED every builder task, so the run
+    # failed although the workers had already done the work. The dispatching
+    # agent writes the plan itself, so the review step is switched off.
+    requireArchitectReview: false
+    notifyDispatchSession: true
+    maxSubagentDepth: 2
+    staleTimeoutSeconds: 7200
+    spawnTimeoutSeconds: 1800
+    maxAttemptSeconds: 2400
+    evidenceTimeoutMs: 300000
+    nudgeAfterMinutes: 20
+    workspaceRunPolicy: warn
+    requireManualEndorsement: false
+
+# ── 4. Subagent guard: three gates on every child agent ────────────
+#   * sandbox ceiling  - a child can never exceed workspace-write
+#   * destructive-command denylist (Windows defaults + Linux additions)
+#   * delegate tool    - pins the child's tool set and system prompt
+- id: dsh-subagent-guard
+  config:
+    enabled: true
+    enforceToolFace: true
+    enforceSandbox: true
+    subagentSandboxCap: workspace-write
+    denyScope: subagent
+    commandArg: command
+    shellTools:
+      - bash
+      - pwsh
+      - win_bash
+    scriptInspection: true
+    maxScriptBytes: 262144
+    enableDelegateTool: true
+    toolName: delegate
+    provider: spawn
+    enforceMaxTools: false
+    serializeBind: true
+    denyPatterns:
+      # -- Windows / disk-level destructive commands (plugin defaults) ----
+      - "\\bvssadmin\\b[^\\r\\n]*\\b(?:delete|resize|revert)\\b"
+      - "\\bwmic\\b[^\\r\\n]*\\bshadowcopy\\b"
+      - "\\bshadowcopy\\b[^\\r\\n]*\\bdelete\\b"
+      - "\\bGet-WmiObject\\b[^\\r\\n]*\\bWin32_ShadowCopy\\b[^\\r\\n]*\\bDelete\\b"
+      - "\\bRemove-ComputerRestorePoint\\b"
+      - "\\bDisable-ComputerRestore\\b"
+      - "\\bdiskpart\\b"
+      - "\\bFormat-Volume\\b"
+      - "\\bClear-Disk\\b"
+      - "\\bInitialize-Disk\\b"
+      - "\\bRemove-Partition\\b"
+      - "\\bformat(?:\\.com)?\\b[ \\t]*[A-Za-z]:"
+      - "\\bbcdedit\\b"
+      - "\\breg(?:\\.exe)?\\s+delete\\s+(?:HKLM|HKEY_LOCAL_MACHINE|HKCU|HKEY_CURRENT_USER|HKEY_USERS|HKCR|HKEY_CLASSES_ROOT)\\b"
+      - "\\b(?:Stop|Restart)-Computer\\b"
+      - "\\bshutdown(?:\\.exe)?\\b[^\\r\\n]*?[\\/-](?:s|r|g|p|h|l|a)\\b"
+      - "\\bcipher(?:\\.exe)?\\s+\\/w"
+      - "\\bsdelete(?:\\.exe)?\\b"
+      # -- Linux / POSIX destructive commands (added for this host) --------
+      - "\\brm\\b[^\\r\\n]*\\s-[a-zA-Z]*[rf][a-zA-Z]*\\s+(?:/|~|\\$HOME|/home/[^/\\s]+|/etc|/usr|/var)(?:\\s|$)"
+      - "\\brm\\b[^\\r\\n]*\\s-[a-zA-Z]*[rf][a-zA-Z]*\\s+--no-preserve-root"
+      - "\\bmkfs(?:\\.[a-z0-9]+)?\\b"
+      - "\\bdd\\b[^\\r\\n]*\\bof=/dev/(?:sd|nvme|hd|vd)"
+      - "\\b(?:shutdown|reboot|halt|poweroff)\\b"
+      - "\\bchmod\\b[^\\r\\n]*\\s-R\\s+(?:777|666)\\s+/"
+      - "\\bchown\\b[^\\r\\n]*\\s-R\\s+[^\\s]+\\s+/"
+      - "\\bkill\\b[^\\r\\n]*\\s-9\\s+-1\\b"
+      - "\\bgit\\b[^\\r\\n]*\\breset\\b[^\\r\\n]*--hard"
+      - "\\bgit\\b[^\\r\\n]*\\bclean\\b[^\\r\\n]*-[a-zA-Z]*f"
+      - ">\\s*/dev/(?:sd|nvme|hd)[a-z0-9]"
+      - "\\b:\\(\\)\\s*\\{\\s*:\\|:&\\s*\\};:"
+
+# ── 5. Protect-tests: refuse weakened assertions ────────────────────
+- id: protect-tests
+  config:
+    mode: deny
+    guardDeletes: true
+    guardTestScript: true
+    allowIdenticalRetry: true
+    minAssertionsRemoved: 2
+    minTestsRemoved: 1
+
+# ── 6. Task reliability: survive flaky providers and restarts ───────
+- id: task-reliability
+  # The plugin declares `inject: ['webServer']` because it serves its API
+  # there, but the web server only exists in the web and desktop profiles.
+  # Without this the plugin stays pending in the TUI and headless profiles,
+  # and every guard it owns — the loop limit, the stall timeout, the
+  # no-progress break and the truncation rescue — is dead exactly where a
+  # long turn would need it. The plugin returns early when the service is
+  # absent, so dropping the requirement costs nothing.
+  config:
+    retryMax: 5
+    retryBaseMs: 5000
+    maxLoop: 8
+    maxVerify: 3
+    watchdogIntervalMs: 300000
+    stallTimeoutMs: 1200000
+    askTimeoutMs: 1800000
+    rescueOnTruncation: true
+    noProgressRounds: 3
+    repeatSimThreshold: 0.8
+    repeatConsecutive: 3
+    autopilot: false
+    notifyOnLoop: false
+
+# ── 7. Subagent compatibility shim ─────────────────────────────────
+# DSH 0.2.x renamed `subagents.start(provider, request)` to
+# `subagents.startActivation({provider, label, request, signal, delivery})`.
+# dsh-swarm-orchestrator 0.6.x still calls the legacy entry point, so every
+# swarm task agent died with "subagents.start is not a function" and the run
+# was marked failed. The shim restores the legacy method on top of the new
+# one, which is what makes the swarm actually able to spawn agents.
+- insert:
+    - id: subagent-compat
+      name: dsh-subagent-compat
+
+# ── 8. Swarm autonomy guard ───────────────────────────────────────
+# The swarm and the UltraCode persona are in place, but the agent still often
+# started editing files one by one instead of fanning out. The guard blocks
+# the SECOND file of a turn and tells the agent to dispatch a swarm of agents;
+# a single-file (ordinary) task is never touched.
+- insert:
+    - id: swarm-autonomy-guard
+      name: dsh-swarm-autonomy-guard
+      config:
+        mode: deny
+        debug: true
+
+# ── 9. Надёжность, безопасность, автоматизация ────────────────────
+# Разбор реальной траектории (468 шагов, 8ч40м, 27 ошибок) показал:
+#  - dedup-цикл одинаковых read-вызовов (шаги 158-169);
+#  - шаги по 4-8 минут из-за нестабильного провайдера;
+#  - агент полностью останавливался и ждал человека;
+#  - approval-запросы висели без ответа;
+#  - «готово» без объективной проверки.
+#
+# loop-guard  — рвёт циклы повторных вызовов (progress-aware).
+# baseline    — fail-closed безопасность: egress, потолок прав, аудит-цепочка.
+# auto-review — отвечает ЗА пользователя на approval-запросы (второй ревьюер).
+# second-review — независимая оценка промпта/плана/качества работы.
+# stall-guard — сторож простоя: сам находит зависшее и будит агента.
+# session-retry — перезапускает упавший turn с растущим backoff.
+# frugality   — механический completion gate (exit-0) + review lane.
+- insert:
+    - id: '@goodandready/dsh-agent-loop-guard'
+      name: '@goodandready/dsh-agent-loop-guard'
+      config:
+        # В траектории было 11 одинаковых read models.rs подряд (шаги 158-169)
+        # при включённом «мягком» repeat-tool-reminder. Порог 3 разрывает цикл
+        # раньше, чем он сожжёт токены.
+        maxCallsPerRepeatGroup: 3
+        maxToolAttemptsPerTurn: 40
+        blockExactDuplicates: true
+        assistantOutputGuard: true
+        maxRepeatedAssistantLines: 3
+        maxRepeatedAssistantBlocks: 3
+        oscillationDetection: true
+        maxOscillationRepeats: 2
+        payloadBloatGuard: true
+    - id: dsh-baseline
+      name: dsh-baseline
+      config:
+        # Fail-closed по умолчанию. 'standard' блокирует сетевой egress во
+        # внутренние сети — но мой провайдерский gateway живёт на localhost
+        # (OmniRoute :20128, FreeLLM :8080), поэтому эти хосты разрешены
+        # явно, а 127.0.0.0/8 убран из blockedCIDRs.
+        defaultMode: standard
+        approvalTimeoutMs: 30000
+        auditRetentionDays: 90
+        networkPolicy:
+          allowedHosts:
+            - localhost
+            - 127.0.0.1
+            - api.hcnsec.cn
+            - registry.npmjs.org
+            - github.com
+            - api.github.com
+          blockedCIDRs:
+            - 10.0.0.0/8
+            - 172.16.0.0/12
+            - 192.168.0.0/16
+            - 169.254.0.0/16
+            - 0.0.0.0/8
+            - 100.64.0.0/10
+            - '::1/128'
+            - '::/128'
+            - fc00::/7
+            - fe80::/10
+        denyBurstThreshold: 10
+        guard:
+          enforceCredentialDeny: true
+          enforceSubagentCeiling: true
+    - id: auto-review
+      name: dsh-auto-review
+      config:
+        # Ревьюер отвечает ЗА пользователя на approval-запросы.
+        # Основная модель — omniroute/hnc/step-5-preview, ревьюер должен быть
+        # ДРУГИМ источником, иначе проверка неindependent.
+        reviewerProvider: omniroute
+        reviewerModel: hnc/MiniMax-M3.1-Flash
+        reviewerModelProvider: omniroute
+        toolsPolicy:
+          overrides:
+            bash: ai
+            write: ai
+            pwsh: ai
+            powershell: ai
+            edit: ai
+        # Максимальная автоматизация: риск по умолчанию 'high', превышение
+        # порога — делегировать человеку.
+        riskPolicy:
+          maxAutoAllow: high
+          onHighRisk: delegate
+    - id: dsh-second-review
+      name: dsh-second-review
+      config: {}
+    # dsh-second-review читает настройки из ~/.dsh/dsh-second-review/config.json
+    # (а не из патча профиля): ревьюер — другой источник (omniroute/hnc/MiniMax),
+    # основная модель — omniroute/hnc/step-5-preview. auto=true — ревью каждого
+    # ответа без участия человека.
+    - id: stall-guard
+      name: dsh-stall-guard
+      config:
+        enabled: true
+        # Порог простоя: 'read' 20с, 'exec' 30с, 'long' 120с (дефолты
+        # плагина). Сторож сам находит зависший вызов и предлагает агенту
+        # переключиться на другой источник/подход.
+        autoSwitch: true
+        watchDownloads: true
+        downloadSeconds: 20
+    - id: session-retry
+      name: dsh-session-retry
+      config:
+        # 25 попыток — с растущим backoff. Это покрывает обрывы провайдера,
+        # из-за которых в траектории шаги тянулись по 4-8 минут.
+        maxAttempts: 25
+        readySignals: true
+        resumeOnStart: true
+        resumeConcurrency: 4
+        resumeDelaySeconds: 5
+    - id: dsh-agent-frugality
+      name: 'dsh-agent-frugality'
+      config: {}
+    - id: dsh-russian-lang
+      name: '@goodandready/dsh-russian-lang'
+      config:
+        enabled: true
+        # Русские алиасы слэш-команд и конвертация раскладки — включены.
+        slashAliases: true
+        layoutConversion: true
+        # Агент тоже говорит по-русски (системный промпт + UI-подсказки).
+        agentPrompt: true
+        # Быстрое переключение раскладки по горячей клавише.
+        quickSwitch: true
+        typography:
+          enabled: true
+          yo: true
+          liveInput: true
+    # Переводы для плагинов, которых нет в dsh-russian-lang.
+    - id: dsh-local-ru
+      name: dsh-local-ru
+      config:
+        enabled: true
+
+# ── 10. One git worktree per swarm worker ──────────────────────────
+# Parallel swarm builders used to write into ONE working tree, so two
+# tasks raced on the same index and a rejected task left half-finished
+# changes behind. This plugin gives every task agent its own worktree,
+# tells the worker about it (its path, its branch, "commit your work"),
+# and merges the accepted branch back into the target branch.
+- insert:
+    - id: swarm-worktree
+      name: dsh-swarm-worktree
+      config:
+        debug: true
+        mergeOnAccept: true
+        targetBranch: main

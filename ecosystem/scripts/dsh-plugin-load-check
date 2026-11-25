@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Load every third-party plugin of the profile and report its export.
+
+A plugin that cannot be imported is a plugin that does not run. This reads each
+installed plugin's entry point and reports the exports it offers.
+"""
+import json
+import os
+import subprocess
+import sys
+
+PROFILE_MODULES = os.path.join(
+    os.environ.get('DSH_HOME', '/home/d/.dsh'), 'profiles', 'web', 'node_modules',
+)
+
+PLUGINS = [
+    '@doiiarx/dsh-todo-continuation',
+    '@goodandready/dsh-agent-loop-guard',
+    '@goodandready/dsh-russian-lang',
+    'dsh-agent-frugality',
+    'dsh-auto-review',
+    'dsh-baseline',
+    'dsh-context-decay',
+    'dsh-git-worktree',
+    'dsh-gitnexus-plugin',
+    'dsh-plugin-stalegreen',
+    'dsh-protect-tests',
+    'dsh-second-review',
+    'dsh-session-retry',
+    'dsh-stall-guard',
+    'dsh-subagent-guard',
+    'dsh-swarm-orchestrator',
+    'dsh-task-reliability',
+    'dsh-ultracode',
+    'dsh-verify-judge',
+    'dsh-verify-kit',
+    'dsh-workflow-worktree',
+    'dsh-worktree',
+]
+
+
+def main() -> int:
+    failures = 0
+    for plugin in PLUGINS:
+        directory = os.path.join(PROFILE_MODULES, plugin)
+        if not os.path.isdir(directory):
+            print(f'FAIL {plugin}: not installed')
+            failures += 1
+            continue
+        manifest_path = os.path.join(directory, 'package.json')
+        with open(manifest_path, encoding='utf-8') as fh:
+            manifest = json.load(fh)
+        entry = manifest.get('main') or 'index.js'
+        target = os.path.join(directory, entry)
+        if not os.path.exists(target):
+            print(f'FAIL {plugin}: entry {entry} is missing')
+            failures += 1
+            continue
+        result = subprocess.run(
+            ['node', '--input-type=module', '-e',
+             f'import * as plugin from "file://{target}"; '
+             'console.log(JSON.stringify(Object.keys(plugin).sort()))'],
+            capture_output=True, text=True, timeout=300,
+            cwd=PROFILE_MODULES,
+        )
+        if result.returncode != 0:
+            reason = result.stderr.strip().splitlines()[-1][:140] if result.stderr.strip() else 'unknown'
+            print(f'FAIL {plugin}: {reason}')
+            failures += 1
+            continue
+        exports = json.loads(result.stdout.strip().splitlines()[-1])
+        if not exports:
+            print(f'FAIL {plugin}: the entry exports nothing')
+            failures += 1
+            continue
+        print(f'OK   {plugin}: exports {", ".join(exports[:6])}')
+    if failures:
+        print(f'\n{failures} plugin(s) failed')
+        return 1
+    print(f'\nall {len(PLUGINS)} third-party plugins load')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

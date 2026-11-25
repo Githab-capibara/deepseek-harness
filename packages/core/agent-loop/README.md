@@ -96,6 +96,10 @@ After `agent/request`, `ctx.llm.prepareCall()` validates adapter-owned fields an
 
 The loop deep-freezes each derived message identity on its first request and reuses that proof only within the same agent. Restored messages keep their identity; request construction does not freeze their containing event wrappers. Each request freezes its local canonical header, fresh message array, and envelope while leaving the cancellation signal live. The [archived request-freeze decision](../../../.agents/notes/archived/simplification/2026-09-06-agent-request-freeze-evidence.md) explains ownership and measurement.
 
+### Request-message decoration seam
+
+An optional provider registered as `modelMessageDecoration` transforms the request messages the loop derives from the Session surface, immediately before they are frozen and sent. The loop reads the provider with `ctx.get('modelMessageDecoration')`; without a provider the request is unchanged. Decoration is presentation only: it never writes the Session log, and the decorated text must be a deterministic function of the log plus the provider's own rules. A provider may also rewrite the assistant message before the loop commits it, through `sanitizeAssistantMessage`, and may report the presentation tokens it adds through `tokenOverhead`; the token meter adds that overhead to heuristic baselines only, because provider usage already contains the decorated request text. A decorated request may carry a one-shot `RequestUserInput` without a durable Session identity; only durable messages join the loop's frozen set. The seam and its service interface live in [`src/message-decoration.ts`](src/message-decoration.ts).
+
 ### Source map
 
 | File | Role |
@@ -104,6 +108,7 @@ The loop deep-freezes each derived message identity on its first request and reu
 | [`src/agent.ts`](src/agent.ts) | The concrete `ReactLoopAgent` driver: inbox, turn/step machine, cancellation |
 | [`src/inbox.ts`](src/inbox.ts) | Package-internal `ReactLoopInbox`: durable projection, structural commands, and loop-only claim state |
 | [`src/runtime-context.ts`](src/runtime-context.ts) | Per-step runtime-context snapshot handling |
+| [`src/message-decoration.ts`](src/message-decoration.ts) | The optional `modelMessageDecoration` service interface: request decoration, assistant-message sanitizing, token overhead |
 
 ### Creation and teardown
 

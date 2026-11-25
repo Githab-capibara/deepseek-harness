@@ -1,0 +1,30 @@
+diff --git a/lib/index.js b/lib/index.js
+index f335b20..b805ca1 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -1044,7 +1044,7 @@ var SessionRetryService = class extends Service {
+ 		ctx.on("agent/created", ({ agent }) => {
+ 			this.attach(agent);
+ 		});
+-		for (const agent of ctx.agents.roots()) this.attach(agent);
++		for (const agent of ctx.agents.list()) this.attach(agent);
+ 		ctx.on("session/event", (session, event) => {
+ 			if (event.type !== "turn/end" && event.type !== "user/message" && event.type !== "command/done") return;
+ 			for (const runtime of this.runtimes.values()) if (runtime.agent.session === session) runtime.drive();
+@@ -1200,14 +1200,14 @@ var SessionRetryService = class extends Service {
+ 		for (const runtime of this.runtimes.values()) runtime.drive();
+ 	}
+ 	attach(agent) {
+-		if (this.runtimes.has(agent) || !this.ctx.agents.roots().includes(agent)) return;
++		if (this.runtimes.has(agent) || !this.ctx.agents.list().includes(agent)) return;
+ 		const runtime = new RetryRuntime({
+ 			state: (target) => this.stateOf(target),
+ 			match: (state) => this.matchOf(state),
+ 			budget: this.budget,
+ 			readySignals: this.readySignals,
+ 			continuation: (source) => this.render(source),
+-			isLive: (target) => this.ctx.agents.get(target.id) === target && this.ctx.agents.roots().includes(target),
++			isLive: (target) => this.ctx.agents.get(target.id) === target && this.ctx.agents.list().includes(target),
+ 			warn: (message) => {
+ 				this.ctx.logger.warn(message);
+ 			},

@@ -1,0 +1,17 @@
+diff --git a/index.js b/index.js
+--- a/index.js
++++ b/index.js
+@@ -73,8 +73,12 @@
+ import { randomUUID } from 'node:crypto'
+ 
+ export const name = 'dsh-second-review'
+ 
+-export const inject = ['webServer']
++// The web server only exists in the web and desktop profiles. Requiring it
++// leaves the plugin pending in the TUI and headless profiles, where its
++// independent review is exactly what a long task needs. The plugin reads
++// the service through ctx.inject, so dropping the requirement costs nothing.
++export const inject = [];
+ 
+ /* 模型↔工具最多来回几轮（不是"工具能调几次"：一轮里可以并行几个工具）。
+    他 2026-11-09 说"工具不要给限制"——指的是别把人数砍成 2 次那种抠法；

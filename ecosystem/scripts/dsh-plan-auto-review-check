@@ -1,0 +1,209 @@
+"""Drive the plan auto-review plugin and report what it decided.
+
+The plugin claims the plan-review request before the UI does and answers it
+with a reviewer's verdict. The check drives the plugin against a stand-in
+subagents service and asserts four facts: an approved plan leaves plan mode, a
+rejected plan comes back with the reviewer's reasons, a request that is not a
+plan review reaches the human, and a plan that keeps being rejected reaches the
+human instead of looping forever.
+
+Usage:
+    ecosystem/scripts/dsh-plan-auto-review-check
+"""
+import json
+import os
+import subprocess
+import sys
+
+PLUGIN = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    'ecosystem', 'plugins', 'dsh-plan-auto-review', 'lib', 'index.js',
+)
+# The plugin's schema comes from the fork's vendored schemastery, which the
+# profile carries as a link. The check therefore loads the plugin from the
+# profile, where that resolution works exactly as it does at runtime.
+PROFILE_PLUGIN = os.path.join(
+    os.environ.get('DSH_HOME', '/home/d/.dsh'),
+    'profiles', 'headless', 'node_modules', 'dsh-plan-auto-review', 'lib', 'index.js',
+)
+
+DRIVER = r'''
+import { apply } from 'file://PLUGIN_PATH'
+
+// The reviewer's answer: a verdict line and the assessment above it.
+const reviewerSays = (assessment, verdict) => `${assessment}\n\nVERDICT: ${verdict}\n`
+
+class SubagentsStub {
+  constructor(replies) {
+    this.replies = replies
+    this.calls = []
+  }
+
+  async startActivation(spec) {
+    this.calls.push(spec)
+    const reply = this.replies.shift() ?? 'VERDICT: APPROVE'
+    let disposed = false
+    return {
+      childId: 'child-reviewer',
+      result: Promise.resolve({ output: [{ type: 'text', text: reply }] }),
+      dispose: () => { disposed = true; return Promise.resolve() },
+    }
+  }
+}
+
+function makeCtx(subagents) {
+  const logs = []
+  const ctx = {
+    logger: () => ({ info: (m) => logs.push(m), warn: (m) => logs.push(m), error: (m) => logs.push(m) }),
+    get: (key) => (key === 'subagents' ? subagents : undefined),
+    on: (event, handler) => { ctx.handler = handler },
+  }
+  return { ctx, logs }
+}
+
+function planRequest(agentId) {
+  return {
+    agent: { id: agentId },
+    questions: [{
+      id: 'plan-review',
+      question: 'Approve this plan and leave plan mode?',
+      detail: '# The plan\n\n1. Do the thing.',
+      options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+      intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-1' },
+    }],
+  }
+}
+
+async function run() {
+  const results = {}
+
+  // 1. An approved plan leaves plan mode.
+  {
+    const subagents = new SubagentsStub([reviewerSays('The plan matches the repository.', 'APPROVE')])
+    const { ctx } = makeCtx(subagents)
+    await apply(ctx, { maxRounds: 3, reviewerBrief: 'brief' })
+    const answer = await ctx.handler(planRequest('agent-a'), async () => ({ delegated: true }))
+    results.approve = answer
+    results.approveCalls = subagents.calls.length
+    results.approvePrompt = subagents.calls[0]?.prompt?.[0]?.text ?? ''
+  }
+
+  // 2. A rejected plan comes back with the reviewer's reasons.
+  {
+    const subagents = new SubagentsStub([reviewerSays('The plan misses the test step.', 'REJECT')])
+    const { ctx } = makeCtx(subagents)
+    await apply(ctx, { maxRounds: 3, reviewerBrief: 'brief' })
+    const answer = await ctx.handler(planRequest('agent-b'), async () => ({ delegated: true }))
+    results.reject = answer
+  }
+
+  // 3. A request that is not a plan review reaches the human.
+  {
+    const subagents = new SubagentsStub([])
+    const { ctx } = makeCtx(subagents)
+    await apply(ctx, { maxRounds: 3, reviewerBrief: 'brief' })
+    const other = {
+      agent: { id: 'agent-c' },
+      questions: [{
+        id: 'approval-1',
+        question: 'Allow the write?',
+        options: [{ label: 'Allow' }, { label: 'Deny' }],
+        intent: { kind: 'approval', approve: 'Allow', reject: 'Deny' },
+      }],
+    }
+    const answer = await ctx.handler(other, async () => ({ delegated: true }))
+    results.other = answer
+    results.otherCalls = subagents.calls.length
+  }
+
+  // 4. A plan that keeps being rejected reaches the human instead of looping.
+  {
+    const subagents = new SubagentsStub([
+      reviewerSays('First reason.', 'REJECT'),
+      reviewerSays('Second reason.', 'REJECT'),
+      reviewerSays('Third reason.', 'REJECT'),
+      reviewerSays('Fourth reason.', 'REJECT'),
+    ])
+    const { ctx } = makeCtx(subagents)
+    await apply(ctx, { maxRounds: 3, reviewerBrief: 'brief' })
+    const outcomes = []
+    for (let round = 0; round < 4; round += 1) {
+      const answer = await ctx.handler(planRequest('agent-d'), async () => ({ delegated: true }))
+      outcomes.push(answer?.delegated === true ? 'delegated' : 'answered')
+    }
+    results.rounds = outcomes
+    results.roundCalls = subagents.calls.length
+  }
+
+  process.stdout.write(JSON.stringify(results))
+  process.stdout.write(String.fromCharCode(10))
+}
+
+await run()
+'''
+
+
+def node(script: str) -> dict:
+    result = subprocess.run(
+        ['node', '--input-type=module', '-e', script],
+        capture_output=True, text=True, timeout=300,
+        cwd=os.path.dirname(os.path.dirname(PROFILE_PLUGIN)),
+    )
+    if result.returncode != 0:
+        raise SystemExit(f'node failed:\n{result.stderr}')
+    lines = [line for line in result.stdout.strip().splitlines() if line.startswith('{')]
+    if not lines:
+        raise SystemExit(f'no report from the driver:\n{result.stdout}\n{result.stderr}')
+    return json.loads(lines[-1])
+
+
+def main() -> int:
+    report = node(DRIVER.replace('PLUGIN_PATH', PROFILE_PLUGIN))
+
+    approve = report.get('approve') or {}
+    if approve.get('answers') != [{'id': 'plan-review', 'selected': ['Approve']}]:
+        print(f'FAIL: an approved plan did not leave plan mode: {approve}')
+        return 1
+    print('OK   an approved plan leaves plan mode')
+    if report.get('approveCalls') != 1:
+        print(f"FAIL: the reviewer ran {report.get('approveCalls')} times for one review")
+        return 1
+    print('OK   one reviewer agent answered one plan')
+    if 'The plan under review' not in report.get('approvePrompt', ''):
+        print('FAIL: the reviewer did not receive the plan')
+        return 1
+    print('OK   the reviewer received the plan under review')
+
+    reject = report.get('reject') or {}
+    answers = reject.get('answers') or []
+    if not answers or answers[0].get('selected') != ['Keep planning']:
+        print(f'FAIL: a rejected plan did not ask for another round: {reject}')
+        return 1
+    if answers[0].get('custom') != 'The plan misses the test step.':
+        print(f"FAIL: the reviewer's reasons did not reach the plan: {answers[0].get('custom')!r}")
+        return 1
+    print("OK   a rejected plan comes back with the reviewer's reasons")
+
+    if (report.get('other') or {}).get('delegated') is not True:
+        print(f"FAIL: a request that is not a plan review did not reach the human: {report.get('other')}")
+        return 1
+    if report.get('otherCalls') != 0:
+        print('FAIL: the reviewer answered a request that is not a plan review')
+        return 1
+    print('OK   every other question still reaches the human')
+
+    rounds = report.get('rounds') or []
+    if rounds != ['answered', 'answered', 'answered', 'delegated']:
+        print(f'FAIL: the review rounds did not end at the limit: {rounds}')
+        return 1
+    if report.get('roundCalls') != 3:
+        print(f"FAIL: the reviewer ran {report.get('roundCalls')} times, expected the limit of 3")
+        return 1
+    print('OK   a plan that keeps being rejected reaches the human instead of looping')
+
+    print('\nOK: the plan reviewer decides, explains, and never loops forever')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

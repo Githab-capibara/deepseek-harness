@@ -1,0 +1,15 @@
+diff --git a/lib/index.js b/lib/index.js
+index 08d8efb707a760dcd045e6acac839f4f61e3e71f..e7b95d03e1a08c1bcf666fa94c4fcd73fdbadb77 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -4,7 +4,9 @@ var name = "stalegreen";
+ function blocksToText(content) {
+   return (content ?? []).filter((b) => b.type === "text" && typeof b.text === "string").map((b) => b.text).join("");
+ }
+-var PLUGIN_SOURCE = { kind: "plugin", plugin: "stalegreen" };
++// DSH session format v4 refuses the retired "plugin" source kind; the
++// producer-owned spelling for a plugin-authored message is "plugin:<name>".
++var PLUGIN_SOURCE = { kind: "plugin:stalegreen" };
+ async function messageFactory() {
+   try {
+     const specifier = "@deepseek-ai/dsh-llm";

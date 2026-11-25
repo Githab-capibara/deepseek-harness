@@ -1,0 +1,33 @@
+{
+  "name": "dsh-swarm-autonomy-guard",
+  "version": "1.0.0",
+  "description": "Makes the swarm the default way to work a complex task: when an agent starts editing several files one by one in the same turn, the guard blocks the second file and tells the agent to dispatch a swarm of agents (swarm_dispatch) instead. Ordinary single-step tasks are never touched.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "import": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dsh": ">=0.2.0-rc.1"
+    }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis-plugin",
+    "swarm",
+    "autonomy"
+  ]
+}

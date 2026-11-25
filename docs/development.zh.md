@@ -140,6 +140,8 @@ DEEPSEEK_BASE_URL=https://... # optional
 
 `DEEPSEEK_BASE_URL` 可选，默认为公开 API。e2e 与 Web 的 Vitest 配置，以及 `DSH_SNAPSHOT=record` 时的快照配置，会自行加载根目录 `.env`；而从仓库根目录启动的 `pnpm dsh` 和 `pnpm run demo:ptc` 会把它当作项目 `.env` 读取，项目 `.env` 不能设置 `DEEPSEEK_BASE_URL`，因此这些启动需要导出该变量，或把它写入 `$DSH_HOME/.env`。请勿提交真实凭证。未设置 `DEEPSEEK_API_KEY` 时，真实 API 的 e2e 套件会自动跳过。
 
+有两个设置决定本地套件运行是否与 CI 一致。`DSH_COVERAGE_TEST_TIMEOUT_MS` 会一并提高 Vitest 的单用例、`expect.poll` 与 hook 预算；CI 将其设为 `90000`，若不设置，在整个清单争抢主机资源时默认预算会提前切断套件，于是打包自身包的套件会报告超时而不是结果。套件运行必须取消 `NODE_USE_ENV_PROXY`：Node 在进程启动时采样代理环境，因此 setup 文件事后无法解绑，本地夹具服务器收到的请求会经过机器的代理而不是回环。门禁运行器在启动门禁前清除该标志；其余代理变量名保持导出，因为本仓库自己的解析器随后仍会读取它们。
+
 ### Git 集成
 
 `.i18n.yaml` 记录使用 Git 默认文本合并。只有当两个分支都修改了同一标题分节中的语言特有内容时，记录才会冲突；先解决 Markdown 冲突，再重新运行 `pnpm run verify-translation-pairing --write <pair>`。如果 `pre-merge-commit` 拒绝原本能干净完成的合并，Git 会把完整结果留在暂存区但不创建提交；请修复失败后运行 `git commit`，或运行 `git merge --abort`。

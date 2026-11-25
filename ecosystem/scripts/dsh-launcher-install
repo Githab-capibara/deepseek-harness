@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Point the `dsh` launcher at this fork's built CLI.
+
+The launcher wrapper in `$DSH_HOME/bin/dsh` decides what a bare `dsh` means
+and then runs the real launcher. That real launcher must be this fork's build:
+the profiles link the fork's runtime packages, and the npm-released launcher
+resolves an older runtime, so it rejects the fork's plugin bundles as
+incompatible and the profile's own packages fail to import against it.
+
+The wrapper is machine-local, so this script patches it in place and keeps the
+previous copy beside it. The fork path comes from `DSH_FORK_HOME` when set and
+from this script's own location otherwise, so the launcher follows a moved
+checkout.
+
+Usage:
+    ecosystem/scripts/dsh-launcher-install [--check]
+"""
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ECOSYSTEM_DIR = os.path.dirname(SCRIPT_DIR)
+REPO_ROOT = os.path.dirname(ECOSYSTEM_DIR)
+# The launcher lives in the installation's bin directory, which is separate
+# from `$DSH_HOME`: the latter holds the profiles and the session data.
+LAUNCHER_DIR = os.environ.get(
+    'DSH_BIN_DIR',
+    os.path.join(os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share')), 'dsh', 'bin'),
+)
+LAUNCHER = os.path.join(LAUNCHER_DIR, 'dsh')
+FORK_CLI = os.path.join(REPO_ROOT, 'apps', 'cli', 'lib', 'bin.js')
+
+# The wrapper resolves the fork's CLI through this variable, so a moved
+# checkout needs one line changed rather than a new wrapper.
+FORK_HOME_LINE = 'FORK_HOME="${DSH_FORK_HOME:-%s}"' % REPO_ROOT
+FIND_REAL_DSH = '''find_real_dsh() {
+  # The fork's built CLI is the launcher this wrapper drives.
+  if [ -f "$FORK_CLI" ]; then
+    printf '%s\\n' "$FORK_CLI"
+    return 0
+  fi
+  # Without the fork build, fall back to the npm-installed launcher.
+  local dir
+  local IFS=:
+  for dir in ${PATH:-}; do
+    [ -n "$dir" ] || continue
+    dir="${dir%/}"
+    [ "$dir" = "$SELF_DIR" ] && continue
+    [ -x "$dir/dsh" ] || continue
+    [ "$(readlink -f -- "$dir/dsh" 2>/dev/null || true)" = "$SELF_DIR/dsh" ] && continue
+    printf '%s\\n' "$dir/dsh"
+    return 0
+  done
+  return 1
+}'''
+
+RUN_REAL_DSH = '''# The fork's CLI is a Node script, so it runs through the Node on PATH.
+run_real_dsh() {
+  if [ -f "$REAL_DSH" ]; then
+    exec node "$REAL_DSH" "$@"
+  fi
+  exec "$REAL_DSH" "$@"
+}'''
+
+
+def launcher_text() -> str:
+    """The wrapper with the fork's CLI in place of the npm-installed one."""
+    with open(LAUNCHER, encoding='utf-8') as fh:
+        text = fh.read()
+
+    # The fork home and the CLI path belong to the wrapper's preamble.
+    if 'FORK_HOME=' not in text:
+        anchor = 'TUI_PROFILE=ultracode\n'
+        if anchor not in text:
+            raise SystemExit(f'{LAUNCHER}: the TUI_PROFILE line is missing; refusing to patch')
+        text = text.replace(anchor, anchor + FORK_HOME_LINE + '\nFORK_CLI="$FORK_HOME/apps/cli/lib/bin.js"\n', 1)
+
+    # The resolver returns the fork's CLI first.
+    match = re.search(r'^find_real_dsh\(\) \{.*?^\}', text, re.M | re.S)
+    if match is None:
+        raise SystemExit(f'{LAUNCHER}: the find_real_dsh function is missing; refusing to patch')
+    text = text[:match.start()] + FIND_REAL_DSH + text[match.end():]
+
+    # Every launch runs through the runner, which knows the fork's CLI is a
+    # Node script.
+    if 'run_real_dsh()' not in text:
+        anchor = '''REAL_DSH="$(find_real_dsh)" || {
+  echo "dsh: the DeepSeek Harness launcher (@deepseek-ai/dsh) was not found on PATH" >&2
+  exit 127
+}
+'''
+        if anchor not in text:
+            raise SystemExit(f'{LAUNCHER}: the REAL_DSH block is missing; refusing to patch')
+        text = text.replace(anchor, anchor + '\n' + RUN_REAL_DSH + '\n', 1)
+    text = text.replace('exec "$REAL_DSH"', 'run_real_dsh')
+    # The runner's own fallback must keep the direct exec.
+    text = text.replace('  run_real_dsh "$@"\n}', '  exec "$REAL_DSH" "$@"\n}')
+
+    return text
+
+
+def install_scripts() -> None:
+    """Copy the operator scripts the launchers call into the launcher directory.
+
+    The launcher directory holds the scripts the launchers and the systemd
+    units invoke by name. They are copies rather than symlinks, so a moved
+    checkout does not leave a dangling path behind.
+    """
+    os.makedirs(LAUNCHER_DIR, exist_ok=True)
+    source_dir = os.path.join(ECOSYSTEM_DIR, 'scripts')
+    installed = []
+    for name in sorted(os.listdir(source_dir)):
+        source = os.path.join(source_dir, name)
+        if not os.path.isfile(source) or name.endswith(('.py', '.md')):
+            continue
+        if not os.access(source, os.X_OK):
+            continue
+        target = os.path.join(LAUNCHER_DIR, name)
+        with open(source, 'rb') as fh:
+            content = fh.read()
+        existing = None
+        if os.path.isfile(target):
+            with open(target, 'rb') as fh:
+                existing = fh.read()
+        if existing == content:
+            continue
+        with open(target, 'wb') as fh:
+            fh.write(content)
+        os.chmod(target, 0o755)
+        installed.append(name)
+    if installed:
+        print(f'OK   {len(installed)} operator script(s) installed into {LAUNCHER_DIR}')
+    else:
+        print(f'OK   the operator scripts in {LAUNCHER_DIR} are current')
+
+
+def main() -> int:
+    if '--check' in sys.argv[1:]:
+        if not os.path.isfile(LAUNCHER):
+            print(f'FAIL: {LAUNCHER} does not exist')
+            return 1
+        with open(LAUNCHER, encoding='utf-8') as fh:
+            text = fh.read()
+        if 'run_real_dsh' not in text or 'FORK_CLI' not in text:
+            print(f'FAIL: {LAUNCHER} does not run the fork CLI')
+            return 1
+        print(f'OK   {LAUNCHER} runs the fork CLI')
+        return 0
+
+    if not os.path.isfile(LAUNCHER):
+        raise SystemExit(f'{LAUNCHER} does not exist')
+    if not os.path.isfile(FORK_CLI):
+        raise SystemExit(f'{FORK_CLI} does not exist; run the build first')
+
+    text = launcher_text()
+    with open(LAUNCHER, encoding='utf-8') as fh:
+        current = fh.read()
+    if current == text:
+        print(f'OK   {LAUNCHER} already runs the fork CLI')
+    else:
+        backup = LAUNCHER + '.bak'
+        if not os.path.exists(backup):
+            shutil.copy2(LAUNCHER, backup)
+            print(f'     previous launcher copied to {backup}')
+        with open(LAUNCHER, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+        os.chmod(LAUNCHER, 0o755)
+        check = subprocess.run(['bash', '-n', LAUNCHER], capture_output=True, text=True)
+        if check.returncode != 0:
+            shutil.copy2(backup, LAUNCHER)
+            raise SystemExit(f'{LAUNCHER}: the patched wrapper does not parse; the previous copy was restored')
+        print(f'OK   {LAUNCHER} now runs {FORK_CLI}')
+    install_scripts()
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

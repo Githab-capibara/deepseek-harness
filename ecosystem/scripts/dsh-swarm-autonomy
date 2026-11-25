@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""Swarm runtime hardening for autonomous, reliable swarm runs.
+
+Three upstream behaviours make an autonomous swarm run fail in practice:
+
+1. `swarm_dispatch` ships a description that forbids the agent from using a
+   swarm unless the human explicitly asked for one, so every chat answered a
+   multi-part task serially. The description is rewritten here so a swarm is
+   the default way to work a task that splits into independent work items.
+
+2. The agent often sets a tiny run-level `budget.maxRequests` (40 was seen).
+   The budget is shared by every worker, so one worker that retries or loops
+   exhausts it and every sibling worker dies with
+   "observed request reservation limit reached". A floor is enforced in the
+   service so a run always has room for its workers.
+
+3. The description of the `budget` parameter does not tell the agent how to
+   size `maxRequests`; the parameter description is patched as well.
+
+Idempotent: every patch carries a marker and a second run reports "already
+patched".
+"""
+import os
+import sys
+
+MARKER = "dsh-swarm-autonomy"
+
+OLD_DESC = ("Use ONLY when the human explicitly asks for a swarm / multi-agent run "
+            "— never as a default way to work a task. ")
+
+NEW_DESC = ("Use it by DEFAULT for non-trivial work: whenever the task splits into two "
+            "or more independent work items (parallel files, modules, subsystems, "
+            "research plus implementation), dispatch a swarm of agents instead of "
+            "working serially - the human does NOT need to ask for it. Do not use it "
+            "for a single indivisible step such as one edit or one answer. "
+            f"[{MARKER}] ")
+
+OLD_BUDGET_DESC = ("Run-level observed-request budget; hard mode is refused on uncertified "
+                   "hosts. Token/cost values are advisory, not enforced caps.")
+
+NEW_BUDGET_DESC = ("Run-level observed-request budget; hard mode is refused on uncertified "
+                   "hosts. Token/cost values are advisory, not enforced caps. "
+                   "maxRequests counts EVERY worker request of the whole run, not one "
+                   "worker: set it generously (at least 300 for a multi-task run) or omit "
+                   "the budget entirely, otherwise one slow worker exhausts the budget and "
+                   "kills all its siblings. "
+                   f"[{MARKER}]")
+
+# The upstream description tells the agent to pass endorse=true ONLY when the
+# human approved the run, so an autonomously dispatched swarm sits in `planning`
+# until somebody clicks the dashboard. The autonomy policy is the opposite: the
+# agent decides that a task is complex, the swarm starts on its own.
+OLD_ENDORSE_HINT = ("Returns the run id; tasks dispatch once the run is endorsed (the human "
+                     "endorses on the dashboard, or pass endorse=true ONLY when the human "
+                     "already approved spawning).")
+
+NEW_ENDORSE_HINT = ("Returns the run id; tasks dispatch once the run is endorsed. "
+                    "Pass endorse=true so the run starts on its own: you decide that the task "
+                    "is complex, the human does not have to approve the run on the dashboard. "
+                    f"[{MARKER}]")
+
+OLD_ENDORSE_PARAM = ("Set true ONLY when the human has explicitly approved spawning this run")
+
+NEW_ENDORSE_PARAM = ("Set true to let the run start immediately without waiting for a human "
+                      "endorsement on the dashboard - use it whenever you decided yourself that "
+                      "the task is complex")
+
+# Already patched variants: they must not be patched a second time.
+PATCHED_BUDGET_DESC = NEW_BUDGET_DESC
+PATCHED_ENDORSE_HINT = NEW_ENDORSE_HINT
+PATCHED_ENDORSE_PARAM = NEW_ENDORSE_PARAM
+
+# The upstream service only endorses a run when the caller passes endorse=true,
+# so an autonomously dispatched swarm sits in `planning` until somebody clicks
+# the dashboard. The autonomy policy is the opposite: the agent decides that a
+# task is complex, so the run must start on its own.
+OLD_ENDORSE_BLOCK = """        if (input.endorse === true && this.swarmConfig.requireManualEndorsement !== true) {
+            this.events.append('run/endorsed', { runId });
+        }"""
+
+NEW_ENDORSE_BLOCK = f"""        if (this.swarmConfig.requireManualEndorsement !== true) {{
+            // [{MARKER}] An autonomously dispatched swarm must not wait for a
+            // human on the dashboard: the agent already decided that the task is
+            // complex, so the run starts immediately.
+            this.events.append('run/endorsed', {{ runId }});
+        }}"""
+
+# The service clamps a tiny budget up to this floor before the run is created.
+REQUEST_BUDGET_FLOOR = 300
+
+OLD_VALIDATE = """        if (input.budget !== undefined) {
+            validateRequestBudget(input.budget);
+            if (input.budget.mode === 'hard')
+                throw new Error('hard request/token/cost budgets are unsupported: complete wire coverage and conservative bounds are not certified');
+        }"""
+
+NEW_VALIDATE = f"""        if (input.budget !== undefined) {{
+            validateRequestBudget(input.budget);
+            if (input.budget.mode === 'hard')
+                throw new Error('hard request/token/cost budgets are unsupported: complete wire coverage and conservative bounds are not certified');
+            // [{MARKER}] The observed-request budget is shared by every worker of the
+            // run. A small cap lets one retrying worker starve all its siblings, so
+            // the cap is raised to a floor that fits a real multi-worker run.
+            if (input.budget.maxRequests !== undefined && input.budget.maxRequests < {REQUEST_BUDGET_FLOOR})
+                input.budget = {{ ...input.budget, maxRequests: {REQUEST_BUDGET_FLOOR} }};
+        }}"""
+
+# The ecosystem lives next to this script inside the fork, so every path is
+# derived from the script location: the fork works from any checkout.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ECOSYSTEM_DIR = os.path.dirname(SCRIPT_DIR)
+REPO_ROOT = os.path.dirname(ECOSYSTEM_DIR)
+PLUGINS_DIR = os.path.join(ECOSYSTEM_DIR, "plugins")
+HOME = os.environ.get("DSH_HOME", "/home/d/.dsh")
+
+ROOTS = [os.path.join(HOME, "profiles")]
+EXTRA = [
+    os.path.join(REPO_ROOT, "node_modules"),
+    PLUGINS_DIR,
+]
+
+
+def copies():
+    """Every installed copy of the swarm plugin (lib/tools/index.js)."""
+    found = []
+    for root in ROOTS + EXTRA:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, _ in os.walk(root):
+            if dirpath.endswith(os.path.join("dsh-swarm-orchestrator", "lib", "tools")):
+                target = os.path.join(dirpath, "index.js")
+                if os.path.exists(target):
+                    found.append(target)
+                dirnames[:] = []
+    return sorted(set(found))
+
+
+def patch_tools(path):
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    changed = False
+    # The upstream sentences are replaced only when they are still there in
+    # their original form. Every patched variant already carries the marker, so
+    # the marker inside the matched window is the reliable "already patched"
+    # signal (the upstream text is a prefix of the patched one).
+    for old, new in ((OLD_DESC, NEW_DESC),
+                     (OLD_BUDGET_DESC, NEW_BUDGET_DESC),
+                     (OLD_ENDORSE_HINT, NEW_ENDORSE_HINT),
+                     (OLD_ENDORSE_PARAM, NEW_ENDORSE_PARAM)):
+        index = text.find(old)
+        while index != -1:
+            window = text[index:index + len(new) + 40]
+            if MARKER in window:
+                break
+            text = text[:index] + new + text[index + len(old):]
+            changed = True
+            break
+    if changed:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return "patched"
+    return "already" if MARKER in text else "skipped"
+
+
+def patch_service(path):
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    changed = False
+    if OLD_VALIDATE in text:
+        text = text.replace(OLD_VALIDATE, NEW_VALIDATE, 1)
+        changed = True
+    if OLD_ENDORSE_BLOCK in text:
+        text = text.replace(OLD_ENDORSE_BLOCK, NEW_ENDORSE_BLOCK, 1)
+        changed = True
+    if changed:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return "patched"
+    return "already" if MARKER in text else "skipped"
+
+
+def main() -> int:
+    changed = 0
+    already = 0
+    for tools in copies():
+        service = os.path.join(os.path.dirname(os.path.dirname(tools)), "service.js")
+        state = patch_tools(tools)
+        svc_state = patch_service(service) if os.path.exists(service) else "skipped"
+        if "patched" in (state, svc_state):
+            changed += 1
+            print(f"{MARKER}: patched {os.path.dirname(os.path.dirname(tools))}")
+        elif "already" in (state, svc_state):
+            already += 1
+    print(f"{MARKER}: changed={changed} already={already}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

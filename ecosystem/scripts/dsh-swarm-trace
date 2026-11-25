@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Locate the exact line that fails a swarm task-agent spawn.
+
+The swarm records the failure reason of every task attempt. This reads the
+orchestrator's spawn path, instruments the activation call, and reports the
+first frame that throws.
+"""
+import json
+import os
+import subprocess
+import sys
+
+PROFILE_MODULES = os.path.join(
+    os.environ.get('DSH_HOME', '/home/d/.dsh'), 'profiles', 'headless', 'node_modules',
+)
+SERVICE = os.path.join(PROFILE_MODULES, 'dsh-swarm-orchestrator', 'lib', 'service.js')
+
+SOURCE = '''
+import { readFileSync, writeFileSync } from 'node:fs'
+const service = 'file://%(service)s'
+const source = readFileSync('%(service)s', 'utf8')
+const marker = 'const parent = await this.ensureAnchor(runId);'
+if (!source.includes(marker)) {
+  console.log(JSON.stringify({ patched: false }))
+} else {
+  writeFileSync('%(service)s', source.replace(marker, marker + '\\n            console.log("[trace] anchor", JSON.stringify({ parent: parent === undefined ? null : { id: parent.id, hasSession: parent.session !== undefined, hasHeader: parent.session?.header !== undefined } }));'))
+  console.log(JSON.stringify({ patched: true }))
+}
+'''
+
+
+def main() -> int:
+    if not os.path.exists(SERVICE):
+        print(f'FAIL: the orchestrator is not installed at {SERVICE}')
+        return 1
+    original = open(SERVICE, encoding='utf-8').read()
+    try:
+        result = subprocess.run(
+            ['node', '--input-type=module', '-e', SOURCE % {'service': SERVICE}],
+            capture_output=True, text=True, timeout=300, cwd=PROFILE_MODULES,
+        )
+        if result.returncode != 0:
+            print('FAIL: the instrumentation failed')
+            print(result.stderr.strip()[:400])
+            return 1
+        facts = json.loads(result.stdout.strip().splitlines()[-1])
+        if not facts.get('patched'):
+            print('FAIL: the spawn anchor line was not found; the orchestrator changed shape')
+            return 1
+        print('OK   the spawn anchor is instrumented; run a swarm task to read the trace')
+        print('     the trace line is: [trace] anchor {"parent":...}')
+        return 0
+    finally:
+        with open(SERVICE, 'w', encoding='utf-8') as fh:
+            fh.write(original)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

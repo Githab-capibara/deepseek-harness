@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Настройки dsh-agent-frugality для окружения запуска DeepSeek Harness.
+#
+# Переменные с префиксом DSH_* запрещены в ~/.dsh/.env — harness читает их
+# только из окружения процесса. Этот файл подключается лаунчерами
+# (dsh-desktop, dsh-web ExecStart) и вызывается из юнитов systemd.
+#
+# «Готово» = команда проверки завершилась с кодом 0.
+export DSH_FRUGALITY_GATE=1
+export DSH_FRUGALITY_GATE_MAX=2
+export DSH_FRUGALITY_VERIFY="${DSH_FRUGALITY_VERIFY:-npm test}"

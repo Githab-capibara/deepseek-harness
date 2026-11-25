@@ -1,0 +1,38 @@
+diff --git a/lib/index.js b/lib/index.js
+index 752729f..09205c3 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -49,6 +49,7 @@ import { homedir } from 'node:os';
+ import { loadStore, saveStore, saveStoreSync, drainStoreWrites, pruneQuestions } from './store.js';
+ import { resumeActiveTasks, runWatchdog } from './verify.js';
+ import { registerListeners } from './events.js';
++import { Context } from '@deepseek-ai/cordis';
+ import { createApi } from './api.js';
+ import { registerTaskCommand } from './command.js';
+ import { createTrustFence, currentProfile, patchFileOf, writePatchConfig } from 'dsh-shared';
+@@ -56,7 +56,11 @@
+ import { emitPluginEvent } from './emit.js';
+ import { RETRYABLE_CODES, RETRY_MAX, MAX_LOOP, MAX_VERIFY, RETRY_BASE_MS, STEER_COOLDOWN_MS, SAVE_DEBOUNCE_MS, RESUME_GRACE_MS, RATE_MAX_ACTIONS, ASK_TIMEOUT_MS, AUTOPILOT_GRACE_MS, WATCHDOG_INTERVAL_MS, STALL_TIMEOUT_MS, REPEAT_SIM_THRESHOLD, REPEAT_CONSECUTIVE, REPEAT_MAX_PER_SESSION, TOOL_LOOP_BUFFER, TOOL_LOOP_CONSECUTIVE, TOOL_LOOP_WINDOW, TOOL_LOOP_READONLY_TOOLS, NO_PROGRESS_ROUNDS, RESCUE_MAX_PER_SESSION, RESCUE_COOLDOWN_MS, } from './constants.js';
+ export const name = 'dsh-task-reliability';
+-export const inject = ['webServer'];
++// The web server only exists in the web and desktop profiles. Requiring it
++// leaves the plugin pending in the TUI and headless profiles, and every guard
++// it owns -- the loop limit, the stall timeout, the no-progress break and the
++// truncation rescue -- stays dead exactly where a long turn would need it.
++export const inject = [];
+ export function apply(ctx, config) {
+     const options = buildOptions(config);
+     const shared = createShared(ctx, options);
+@@ -228,8 +228,10 @@ function createShared(ctx, options) {
+  */
+ const rootRoutes = new WeakMap();
+ function registerApi(ctx, shared) {
+-    const listenCtx = ctx.root ?? ctx;
++    const listenCtx = ctx[Context.root] ?? ctx;
+-    const webServer = ctx.webServer ?? listenCtx.webServer;
++    // The web server is optional here: the plugin no longer requires it,
++    // so reading the service must not throw when it is absent.
++    const webServer = listenCtx.get('webServer');
+     if (webServer === undefined)
+         return;
+     rootRoutes.get(listenCtx)?.();

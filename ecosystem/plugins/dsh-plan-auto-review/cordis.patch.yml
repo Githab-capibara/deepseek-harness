@@ -1,0 +1,18 @@
+# Bundle layer contributed by dsh-plan-auto-review.
+# It claims the plan-review request before the UI does and answers it with a
+# reviewer's verdict, so plan mode advances without a human click.
+- insert:
+    - id: plan-auto-review
+      name: dsh-plan-auto-review
+      config:
+        # How many times one plan may be rejected before the request reaches
+        # the human. A reviewer that keeps rejecting without new reasons must
+        # not hold the session forever.
+        maxRounds: 3
+        # The plan, review and implement phases then run without a mode
+        # switch by hand: the plugin turns plan mode on when the agent
+        # appears, and answers the plan review with the reviewer's verdict.
+        autoEnterPlanMode: true
+        # A reviewer that reads the repository needs a few minutes; past this
+        # the plan reaches the human instead of holding the session.
+        reviewTimeoutMs: 600000

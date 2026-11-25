@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+"""Generate the Russian dictionaries of the swarm stack panels.
+
+The panels ask the locale runtime for a key and fall back to their own
+English table, so a Russian dictionary must carry the SAME keys. This script
+reads the extracted key sets (`dsh-ru-keys`) and writes the `ru` tables into
+the client bundle of dsh-local-ru.
+
+Naming rule: technology names, API names, commands, formats and product
+names stay English (swarm, worktree, token, commit, git, npm, MCP, UltraCode,
+prompt, tool, plugin, session, provider, agent, subagent, model, context,
+plan, review, gate, stream, timeout, retry, CI/CD, ...). Everything else is
+Russian.
+"""
+import json
+import os
+import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ECOSYSTEM_DIR = os.path.dirname(SCRIPT_DIR)
+PLUGIN_DIR = os.path.join(ECOSYSTEM_DIR, "plugins", "dsh-local-ru")
+KEYS_FILE = "/tmp/opencode/ru-keys.json"
+
+# ── The Russian tables ────────────────────────────────────────────────
+# Keys are the ones the panels use; the values are the visible UI text.
+TABLES: dict[str, dict[str, str]] = {
+    "swarm": {
+        "sync.connecting": "подключение…",
+        "sync.live": "в сети",
+        "sync.catching-up": "синхронизация…",
+        "sync.reconnecting": "переподключение…",
+        "sync.snapshot": "снимок",
+        "sync.stopped": "остановлено",
+        "board.refreshError": "не удалось обновить доску",
+        "board.refresh": "обновить доску",
+        "board.unavailable": "доска недоступна",
+        "scope.resolving": "определяем область",
+        "scope.fallback": "запасной вариант области",
+        "draft.conflict": "черновик конфликтует",
+        "draft.reload": "перезагрузить черновик",
+        "draft.keep": "оставить мой",
+        "draft.unsaved": "несохранённые изменения",
+        "field.builder": "исполнитель",
+        "field.reviewer": "проверяющий",
+        "field.reviewStatus": "статус проверки",
+        "field.role": "роль",
+        "field.model": "модель",
+        "field.provider": "провайдер",
+        "field.fallbacks": "резервные модели",
+        "field.maxTokens": "лимит токенов",
+        "field.effort": "глубина рассуждения",
+        "field.effortLadder": "лестница глубины",
+        "field.cap": "потолок",
+        "field.concurrency": "параллельность",
+        "field.persona": "роль агента",
+        "field.brief": "постановка задачи",
+        "field.attempts": "попытки",
+        "field.dependsOn": "зависит от",
+        "field.acceptanceState": "состояние приёмки",
+        "field.artifactState": "состояние артефактов",
+        "field.evidenceOutcomes": "результаты проверок",
+        "field.executionState": "состояние выполнения",
+        "field.fileWarnings": "предупреждения по файлам",
+        "field.finalSummary": "итоговое резюме",
+        "field.latestNote": "последняя заметка",
+        "field.provenance": "происхождение",
+        "field.reviewedBy": "проверил",
+        "field.deploymentDefault": "по умолчанию для развёртывания",
+        "field.human": "человек",
+        "field.identityUnknown": "идентификатор неизвестен",
+        "field.loopExhausted": "цикл исчерпан",
+        "roster.addRole": "добавить роль",
+        "roster.removeRole": "убрать роль",
+        "roster.catalogLive": "каталог в сети",
+        "roster.catalogCached": "каталог из кэша",
+        "roster.catalogStale": "каталог устарел",
+        "roster.effortInherit": "наследуется",
+        "roster.fallbackRemove": "убрать резерв",
+        "roster.up": "доступен",
+        "roster.down": "недоступен",
+        "run.status.running": "выполняется",
+        "run.status.planning": "планируется",
+        "run.status.completed": "завершён",
+        "run.status.failed": "провален",
+        "run.status.blocked": "заблокирован",
+        "run.status.pending": "в очереди",
+        "run.status.retrying": "повтор",
+        "run.status.reviewing": "на проверке",
+        "run.status.dispatching": "запускается",
+        "run.status.awaiting-endorsement": "ждёт одобрения",
+        "run.status.aborted": "прерван",
+        "run.status.paused": "приостановлен",
+        "run.action.endorse": "одобрить",
+        "run.action.abort": "прервать",
+        "run.action.pause": "пауза",
+        "run.action.resume": "продолжить",
+        "run.action.retry-task": "повторить задачу",
+        "run.action.interrupt": "прервать задачу",
+        "run.action.complete": "завершить задачу",
+        "task.none": "задач пока нет",
+        "run.none": "прогонов пока нет",
+        "title": "Swarm",
+        "subtitle": "Рой агентов: параллельные задачи с общей доской",
+        "roster": "Ростер",
+        "runs": "Прогоны",
+        "tasks": "Задачи",
+        "board": "Доска",
+        "dispatch": "Запуск",
+        "dutyTable": "Таблица ролей",
+        "activeRun": "Активный прогон",
+        "running": "выполняется",
+        "planning": "планируется",
+        "completed": "завершён",
+        "failed": "провален",
+        "blocked": "заблокирован",
+        "pending": "в очереди",
+        "retrying": "повтор",
+        "reviewing": "на проверке",
+        "dispatching": "запускается",
+        "awaitingEndorsement": "ждёт одобрения",
+        "aborted": "прерван",
+        "paused": "приостановлен",
+        "addRole": "добавить роль",
+        "removeRole": "убрать роль",
+        "noRuns": "прогонов пока нет",
+        "noTasks": "задач пока нет",
+        "merge": "слить в main",
+    },
+    "dsh-baseline": {
+        "panel.title": "Журнал решений",
+        "panel.subtitle": "Хеш-цепочка: каждое решение связано с предыдущим",
+        "panel.label": "Аудит",
+        "policy.allowedHosts": "Разрешённые хосты",
+        "policy.allowedHostsHint": "Куда агенту разрешено ходить по сети",
+        "policy.blockedCIDRs": "Заблокированные подсети",
+        "policy.blockedCIDRsHint": "Диапазоны, из которых исходящие запросы запрещены",
+        "policy.maxEgress": "Лимит исходящих соединений",
+        "policy.maxEgressHint": "Сколько одновременных сетевых вызовов допустимо",
+        "policy.readonly": "Только чтение",
+        "policy.revert": "Вернуть значение по умолчанию",
+        "policy.hint": "Правила применяются к каждому вызову инструмента до его выполнения.",
+        "detail.agent": "Агент",
+        "detail.chain": "Цепочка",
+        "detail.feedback": "Обратная связь",
+        "detail.feedbackDone": "Спасибо, ответ сохранён",
+        "detail.feedbackHint": "Что оказалось неверным в решении?",
+        "detail.feedbackPlaceholder": "Опишите, что сработало не так",
+        "detail.feedbackSubmit": "Отправить",
+        "detail.feedbackSubmitting": "Отправляем…",
+        "detail.hash": "Хеш",
+        "detail.prevHash": "Хеш предыдущей записи",
+        "detail.params": "Параметры",
+        "detail.reason": "Причина",
+        "detail.rule": "Правило",
+        "detail.session": "Сессия",
+        "detail.time": "Время",
+        "status.allow": "Разрешено",
+        "status.deny": "Отклонено",
+        "status.ask": "Требует подтверждения",
+        "status.chainBrokenAt": "Цепочка нарушена на записи",
+        "records": "Записи",
+        "filters": "Фильтры",
+        "title": "Безопасность (baseline)",
+        "subtitle": "Fail-closed: egress, потолок прав субагентов, аудит-цепочка",
+        "enabled": "Baseline включён",
+        "enabledDesc": "Любое сомнение трактуется как отказ — вызов не выполняется.",
+    },
+    "contextDecay": {
+        "panel.allocated": "Выделено",
+        "panel.anchors": "Якоря",
+        "panel.append": "Дописать",
+        "panel.blocks": "Блоки",
+        "panel.drop": "Отбросить",
+        "panel.empty": "Пока пусто",
+        "panel.fold": "Свернуть",
+        "panel.foldable": "Сворачивается",
+        "panel.free": "Свободно",
+        "panel.freeIds": "Свободные идентификаторы",
+        "panel.growth": "Рост",
+        "panel.lastReminder": "Последнее напоминание",
+        "panel.lastRequest": "Последний запрос",
+        "panel.level": "Уровень",
+        "panel.live": "В работе",
+        "panel.mechanism": "Механизм",
+        "panel.mechanismCaption": "Как именно работает сжатие",
+        "panel.messages": "Сообщения",
+        "panel.source": "Источник",
+        "tip.title": "Совет",
+        "tip.contextFull": "Контекст заполнен — следующий запрос будет сжат.",
+        "tip.foldable": "Часть сообщений можно свернуть без потери смысла.",
+        "tip.anchor": "Якорь сохраняет важный фрагмент от сжатия.",
+        "stat.used": "Занято",
+        "stat.total": "Всего",
+        "stat.ratio": "Доля",
+        "title": "Управление контекстом",
+        "subtitle": "Автосжатие и подсказки по расходу контекста",
+    },
+    "session-retry": {
+        "status.due": "Пора повторить",
+        "status.exhausted": "Попытки исчерпаны",
+        "status.next": "Следующая попытка",
+        "status.notReady": "Ещё рано",
+        "status.running": "Перезапуск",
+        "status.waiting": "Ожидание паузы",
+        "time.days": "д",
+        "time.hours": "ч",
+        "time.minutes": "м",
+        "time.seconds": "с",
+        "tooltip.exhausted": "Все попытки использованы — нужен человек.",
+        "tooltip.next": "Следующая попытка через",
+        "tooltip.reason": "Причина перезапуска",
+        "action.failed": "Не удалось перезапустить",
+        "action.retryNow": "Повторить сейчас",
+        "action.stop": "Остановить",
+        "title": "Перезапуск сессии",
+        "subtitle": "Упавший turn перезапускается сам с растущей паузой",
+    },
+    "dsh.stallGuard": {
+        "title": "Сторож простоя",
+        "supervisor": "Сторож простоя",
+        "openPanel": "Открыть настройки сторожа",
+        "close": "Закрыть",
+        "ack": "Подтвердить",
+        "ackSending": "Отправляем…",
+        "ackDone": "Подтверждено",
+        "ackFailed": "Не удалось подтвердить",
+        "modeIdle": "Ожидает",
+        "modeWatching": "Наблюдает",
+        "modeAlert": "Тревога",
+        "levelLabel": "Уровень",
+        "noState": "Пока нет данных",
+        "sectionTimers": "Лимиты времени",
+        "subtitle": "Находит зависшие вызовы и будит агента",
+        "enabled": "Сторож включён",
+        "enabledDesc": "Отслеживает время последней активности в сессии.",
+        "autoSwitch": "Автопереключение",
+        "autoSwitchDesc": "Предложить агенту сменить источник или подход.",
+        "watchDownloads": "Следить за загрузками",
+        "downloadSeconds": "Лимит загрузки, с",
+        "bubble": "Подсказка агенту",
+        "bubbleDesc": "Показывать агенту объяснение, что он завис.",
+    },
+    "@goodandready/dsh-agent-loop-guard": {
+        "title": "Защита от циклов",
+        "sub": "Рвёт повторяющиеся вызовы и одинаковые строки ответа",
+        "version": "Версия",
+        "updateChecking": "Проверяем обновления…",
+        "updateAvailable": "Доступно обновление",
+        "upToDate": "Актуальная версия",
+        "updateNow": "Обновить сейчас",
+        "updateViaPluginsPage": "Обновить на странице плагинов",
+        "updating": "Обновляем…",
+        "updateSuccess": "Обновлено",
+        "updateFailed": "Не удалось обновить",
+        "checkUpdateFailed": "Проверка обновлений не удалась",
+        "telemetryTitle": "Телеметрия",
+        "telemetryLoadFailed": "Не удалось загрузить телеметрию",
+        "enabled": "Защита включена",
+        "enabledDesc": "Блокирует вызов, который не меняет состояние.",
+        "maxCallsPerRepeatGroup": "Повторов до блокировки",
+        "maxRepeatedAssistantLines": "Одинаковых строк ответа",
+        "maxRepeatedAssistantBlocks": "Одинаковых блоков ответа",
+        "oscillationDetection": "Детекция колебаний",
+        "maxOscillationRepeats": "Повторов колебаний",
+        "payloadBloatGuard": "Защита от раздутых ответов",
+        "maxToolAttemptsPerTurn": "Лимит вызовов за turn",
+        "blocked": "Вызов заблокирован: нет прогресса",
+    },
+    "autoReviewPanel": {
+        "active": "Ревьюер активен",
+        "advanced": "Расширенные параметры",
+        "advancedHint": "Ограничивают доказательства, вывод, повторы и восстановление после сбоя.",
+        "title": "Авто-ревью запросов",
+        "subtitle": "Ревьюер отвечает за вас на запросы подтверждения",
+        "enabled": "Ревью включено",
+        "enabledDesc": "После каждого запроса подтверждения выносится независимый вердикт.",
+        "reviewerProvider": "Провайдер ревьюера",
+        "reviewerModel": "Модель ревьюера",
+        "toolsPolicy": "Какие инструменты ревьюить",
+        "toolsPolicyHint": "Инструменты вне списка остаются за человеком.",
+        "riskPolicy": "Политика риска",
+        "maxAutoAllow": "Максимальный риск для автоодобрения",
+        "onHighRisk": "Действие при высоком риске",
+        "verdictAllow": "Разрешить",
+        "verdictDeny": "Отклонить",
+        "reviewerUnavailable": "Ревьюер недоступен — действие отклонено (fail-closed)",
+    },
+    "plugin.dsh-protect-tests": {
+        "title": "Защита тестов",
+        "sub": "Тесты нельзя ослабить ради зелёного прогона",
+        "enabled": "Защита включена",
+        "blocked": "Правка теста заблокирована",
+        "reason": "Тесты изменены, чтобы пройти, а не чтобы проверить.",
+    },
+}
+
+
+def build_client_js(tables: dict[str, dict[str, str]]) -> str:
+    """The client bundle: it registers the Russian dictionaries."""
+    import json as _json
+    body = _json.dumps(tables, ensure_ascii=False, indent=2)
+    return f"""window.__ModuleLoader__.load({{id:'dsh-local-ru',factory:(require) => {{var module = {{ exports:{{}} }}
+
+// Русские словари для панелей плагинов, которых нет в dsh-russian-lang.
+// Названия технологий и API остаются на английском, остальное — на русском.
+var TRANSLATIONS = {body};
+
+var CONFIG = {{ enabled: true }}
+
+function apply(ctx, config) {{
+  var cfg = Object.assign({{}}, CONFIG, config || {{}})
+  if (cfg.enabled === false) return
+  var locale = ctx.get('locale')
+  if (locale === undefined || typeof locale.register !== 'function') return
+  var namespaces = Object.keys(TRANSLATIONS)
+  for (var i = 0; i < namespaces.length; i++) {{
+    var ns = namespaces[i]
+    try {{
+      locale.register(ns, {{ ru: TRANSLATIONS[ns] }})
+    }} catch (err) {{
+      var msg = String(err)
+      if (msg.indexOf('already has locale') === -1) {{
+        console.log('[dsh-local-ru] ' + ns + ': ' + msg)
+      }}
+    }}
+  }}
+}}
+
+module.exports = {{ apply: apply, inject: ['locale'], TRANSLATIONS: TRANSLATIONS }}
+return module.exports}},}})
+"""
+
+
+def load_keys() -> dict[str, list[str]]:
+    """The key sets extracted from the panels' English tables."""
+    with open(KEYS_FILE, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def main() -> int:
+    keys = load_keys()
+    # Report the keys that have no Russian entry: they fall back to English.
+    missing_total = 0
+    for namespace, entries in keys.items():
+        table = TABLES.get(namespace, {})
+        missing = [key for key in entries if key not in table]
+        missing_total += len(missing)
+        status = "OK" if not missing else f"{len(missing)} без перевода"
+        print(f"{namespace}: {len(table)} переводов / {len(entries)} ключей — {status}")
+        if missing:
+            print(f"    без перевода: {', '.join(missing[:12])}")
+    print(f"всего ключей без перевода: {missing_total}")
+    out = os.path.join(PLUGIN_DIR, "lib", "client.js")
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(build_client_js(TABLES))
+    print(f"written: {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -64,6 +64,21 @@ describe('concrete terminology policy', () => {
     )).toEqual([{ file: '.agents/notes/implemented/process/current.md', line: 1 }])
   })
 
+  it('excludes the machine-local ecosystem tree but keeps every other area in scope', () => {
+    expect(findConcreteTermViolations(
+      'ecosystem/plugins/dsh-local-ru/lib/tables/swarm.js',
+      blockedTerm,
+    )).toEqual([])
+    expect(findConcreteTermViolations(
+      'ecosystem.md',
+      blockedTerm,
+    )).toEqual([{ file: 'ecosystem.md', line: 1 }])
+    expect(findConcreteTermViolations(
+      'packages/example/src/source.ts',
+      blockedTerm,
+    )).toEqual([{ file: 'packages/example/src/source.ts', line: 1 }])
+  })
+
   it('preserves historical identifiers only in alpha and RC release schema snapshots', () => {
     for (const channel of ['alpha', 'rc']) {
       expect(findConcreteTermViolations(

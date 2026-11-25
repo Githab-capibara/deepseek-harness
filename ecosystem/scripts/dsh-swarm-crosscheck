@@ -1,0 +1,78 @@
+"""Cross-check the swarm's delivered modules against independent references.
+
+The swarm workers wrote `ecosystem-check/a.py`, `b.py`, and `c.py`; this script
+recomputes the same answers with `math.factorial` and a reference Fibonacci
+sequence, so a wrong implementation cannot agree with itself. The references
+are computed here, not imported from the modules under test.
+
+Run it from the repository root:
+
+    python3 ecosystem/scripts/dsh-swarm-crosscheck
+"""
+import math
+import sys
+from pathlib import Path
+
+SRC = Path(__file__).resolve().parent.parent.parent / 'ecosystem-check'
+sys.path.insert(0, str(SRC))
+
+from a import alpha  # noqa: E402
+from b import beta  # noqa: E402
+from c import gamma  # noqa: E402
+
+
+def reference_fibonacci(n: int) -> list[int]:
+    """The first ``n`` Fibonacci numbers, computed without ``beta``."""
+    values = []
+    current, following = 0, 1
+    for _ in range(n):
+        values.append(current)
+        current, following = following, current + following
+    return values
+
+
+def reference_prime(n: int) -> bool:
+    """Whether ``n`` is prime, decided without ``gamma``."""
+    if n < 2:
+        return False
+    divisor = 2
+    while divisor * divisor <= n:
+        if n % divisor == 0:
+            return False
+        divisor += 1
+    return True
+
+
+def main() -> int:
+    if not SRC.is_dir():
+        print(f'FAIL: {SRC} does not exist — run the swarm check first')
+        return 1
+    failures = []
+
+    for n in range(0, 501):
+        if alpha(n) != math.factorial(n):
+            failures.append(f'alpha({n}) != math.factorial({n})')
+
+    for n in range(0, 101):
+        expected = reference_fibonacci(n)
+        if beta(n) != expected:
+            failures.append(f'beta({n}) != {expected}')
+
+    for n in range(0, 501):
+        if gamma(n) != reference_prime(n):
+            failures.append(f'gamma({n}) != {reference_prime(n)}')
+
+    if failures:
+        print(f'FAIL: {len(failures)} mismatches against the references')
+        for line in failures[:10]:
+            print(f'  {line}')
+        return 1
+    print('OK: alpha, beta and gamma agree with the independent references')
+    print('  alpha: 0..500 against math.factorial')
+    print('  beta: 0..100 against a reference Fibonacci sequence')
+    print('  gamma: 0..500 against a reference primality test')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

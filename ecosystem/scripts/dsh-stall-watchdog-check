@@ -1,0 +1,162 @@
+"""Drive the stall watchdog and report what it did.
+
+The check exercises the two interventions: a step that only reasons, and a step
+that only collects refused tool calls. In both cases the watchdog must end the
+turn and start the next one with a message that says what to do.
+"""
+import json
+import subprocess
+
+PLUGIN = '/home/d/.dsh/profiles/headless/node_modules/dsh-stall-watchdog/lib/index.js'
+
+SCRIPT = r'''
+import { apply } from 'file://PLUGIN_PATH'
+
+const events = []
+const cancelled = []
+const followedUp = []
+let turn = 0
+let step = 0
+
+const agent = {
+  id: 'agent-1',
+  cancel: (cause) => { cancelled.push(cause) },
+  followup: (message) => { followedUp.push(message) },
+}
+
+const handlers = {}
+const agents = { list: () => [agent] }
+const ctx = {
+  logger: () => ({ info: () => {}, warn: () => {} }),
+  get: (key) => (key === 'agents' ? agents : undefined),
+  inject: (deps, callback) => { callback(ctx); return ctx; },
+  on: (event, handler) => { handlers[event] = handler; },
+  effect: (callback) => callback(),
+}
+
+await apply(ctx, { stallMs: 1000, nudgeText: 'act now', maxRefusals: 2, refusalNudgeText: 'change strategy' })
+
+// --- 1. a step that only reasons ---
+turn += 1; step += 1
+handlers['agent/pre-step']({ agent, turn, step }, async () => ({ kind: 'renderContextSections' }))
+handlers['agent/assistant-stream']({ agent, frame: { chunk: { type: 'reasoning-delta', index: 0, text: 'thinking' } } })
+await new Promise((resolve) => setTimeout(resolve, 16000))
+events.push({
+  case: 'only reasoning',
+  cancelled: cancelled.length,
+  followedUp: followedUp.length,
+  nudge: followedUp[0]?.content?.[0]?.text ?? null,
+  cause: cancelled[0]?.kind ?? null,
+})
+
+// --- 2. a step that only collects refused calls ---
+cancelled.length = 0
+followedUp.length = 0
+turn += 1; step += 1
+handlers['agent/pre-step']({ agent, turn, step }, async () => ({ kind: 'renderContextSections' }))
+const refusal = {
+  isError: true,
+  error: { message: '[LOOP_GUARD_DUPLICATE] identical tool call repeated without a new result. ACTION REQUIRED: stop repeating.' },
+  content: [{ type: 'text', text: 'blocked' }],
+}
+handlers['tools/result']({ agent, name: 'read', callId: 'c1', arguments: {} }, refusal)
+handlers['tools/result']({ agent, name: 'read', callId: 'c2', arguments: {} }, refusal)
+events.push({
+  case: 'only refusals',
+  cancelled: cancelled.length,
+  followedUp: followedUp.length,
+  nudge: followedUp[0]?.content?.[0]?.text ?? null,
+  cause: cancelled[0]?.kind ?? null,
+})
+
+// --- 3. one refusal is not enough ---
+cancelled.length = 0
+followedUp.length = 0
+turn += 1; step += 1
+handlers['agent/pre-step']({ agent, turn, step }, async () => ({ kind: 'renderContextSections' }))
+handlers['tools/result']({ agent, name: 'read', callId: 'c3', arguments: {} }, refusal)
+events.push({ case: 'one refusal', cancelled: cancelled.length, followedUp: followedUp.length })
+
+// --- 4. a successful call is not a refusal ---
+cancelled.length = 0
+followedUp.length = 0
+turn += 1; step += 1
+handlers['agent/pre-step']({ agent, turn, step }, async () => ({ kind: 'renderContextSections' }))
+handlers['tools/result']({ agent, name: 'read', callId: 'c4', arguments: {} },
+  { isError: false, value: null, content: [{ type: 'text', text: 'file body' }] })
+events.push({ case: 'success', cancelled: cancelled.length, followedUp: followedUp.length })
+
+// --- 5. a turn that already acted is not stalled, however long it thinks ---
+cancelled.length = 0
+followedUp.length = 0
+turn += 1; step += 1
+handlers['agent/pre-step']({ agent, turn, step }, async () => ({ kind: 'renderContextSections' }))
+await handlers['tools/execute']({ agent, name: 'read', callId: 'c5', arguments: {} }, async () => ({
+  isError: false, value: null, content: [{ type: 'text', text: 'file body' }],
+}))
+handlers['agent/assistant-stream']({ agent, frame: { chunk: { type: 'reasoning-delta', index: 0, text: 'thinking' } } })
+await new Promise((resolve) => setTimeout(resolve, 16000))
+events.push({ case: 'productive turn', cancelled: cancelled.length, followedUp: followedUp.length })
+
+process.stdout.write(JSON.stringify(events))
+// The watchdog keeps a timer alive; the driver ends the process itself.
+process.exit(0)
+'''
+
+
+def main() -> int:
+    result = subprocess.run(
+        ['node', '--input-type=module', '-e', SCRIPT.replace('PLUGIN_PATH', PLUGIN)],
+        capture_output=True, text=True, timeout=180,
+        cwd='/home/d/.dsh/profiles/headless')
+    if result.returncode != 0:
+        print('FAIL: the driver failed')
+        print(result.stderr[-1500:])
+        return 1
+    cases = json.loads(result.stdout.strip().splitlines()[-1])
+    failures = []
+
+    reasoning = next((case for case in cases if case['case'] == 'only reasoning'), None)
+    if reasoning is None or reasoning['cancelled'] != 1 or reasoning['followedUp'] != 1:
+        failures.append(f'the reasoning step was not interrupted: {reasoning}')
+    elif reasoning['nudge'] != 'act now':
+        failures.append(f'the reasoning nudge is wrong: {reasoning["nudge"]!r}')
+    else:
+        print('OK   a step that only thinks is interrupted and nudged')
+
+    refusals = next((case for case in cases if case['case'] == 'only refusals'), None)
+    if refusals is None or refusals['cancelled'] != 1 or refusals['followedUp'] != 1:
+        failures.append(f'the refusal loop was not interrupted: {refusals}')
+    elif refusals['nudge'] != 'change strategy':
+        failures.append(f'the refusal nudge is wrong: {refusals["nudge"]!r}')
+    else:
+        print('OK   a step that only collects refusals is interrupted and nudged')
+
+    one = next((case for case in cases if case['case'] == 'one refusal'), None)
+    if one is None or one['cancelled'] != 0:
+        failures.append(f'a single refusal ended the turn too early: {one}')
+    else:
+        print('OK   a single refusal does not end the turn')
+
+    success = next((case for case in cases if case['case'] == 'success'), None)
+    if success is None or success['cancelled'] != 0:
+        failures.append(f'a successful call was treated as a refusal: {success}')
+    else:
+        print('OK   a successful call is not a refusal')
+
+    productive = next((case for case in cases if case['case'] == 'productive turn'), None)
+    if productive is None or productive['cancelled'] != 0:
+        failures.append(f'a turn that already acted was interrupted: {productive}')
+    else:
+        print('OK   a turn that already acted is not interrupted')
+
+    for failure in failures:
+        print(f'FAIL: {failure}')
+    if failures:
+        return 1
+    print('\nOK: the watchdog ends a turn that only thinks and a turn that only collects refusals')
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

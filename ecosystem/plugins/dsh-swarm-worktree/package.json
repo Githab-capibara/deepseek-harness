@@ -1,0 +1,32 @@
+{
+  "name": "dsh-swarm-worktree",
+  "version": "1.0.0",
+  "description": "Gives every swarm task agent its own git worktree and tells it about it, so parallel workers never fight over one working tree; the orchestrator merges the accepted work back into main.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "import": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dsh": ">=0.2.0-rc.1"
+    }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "swarm",
+    "worktree",
+    "git"
+  ]
+}

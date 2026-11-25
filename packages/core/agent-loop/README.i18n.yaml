@@ -35,9 +35,12 @@
 /deepseek-ai-dsh-agent-loop/understand-the-implementation/request-headers-and-adapter-defaults:
   en: 21547fd3591f1ff7
   zh: 80b622e5a0827505
+/deepseek-ai-dsh-agent-loop/understand-the-implementation/request-message-decoration-seam:
+  en: 6932c4bb6b25548e
+  zh: 2112df5cbdce828e
 /deepseek-ai-dsh-agent-loop/understand-the-implementation/source-map:
-  en: ec2bf804bd1a5439
-  zh: 316e767507e859ef
+  en: ea2b219d73059d8f
+  zh: e776f171edca7272
 /deepseek-ai-dsh-agent-loop/understand-the-implementation/creation-and-teardown:
   en: 4a10108fb0d37732
   zh: cc3be0eb8f00901c

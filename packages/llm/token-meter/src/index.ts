@@ -185,11 +185,22 @@ export class TokenMeter extends Service {
       surfaceDeltaTokens = 0
     }
 
+    // Local patch: the optional request-decoration provider reports the
+    // presentation tokens it adds (anchors). Provider usage already contains
+    // them, so only heuristic baselines add the overhead.
+    const decoration = this.ctx.get('modelMessageDecoration') as
+      | { tokenOverhead?: (session: Session) => number | undefined }
+      | undefined
+    const decorationOverheadTokens = baseline.kind === 'usage'
+      ? 0
+      : decoration?.tokenOverhead?.(session) ?? 0
+
     return deepFreeze(structuredClone({
       logRevision: state.consumedEvents,
       baseline,
       surfaceDeltaTokens,
-      totalTokens: Math.max(0, baseline.tokens + surfaceDeltaTokens),
+      totalTokens: Math.max(0, baseline.tokens + surfaceDeltaTokens + decorationOverheadTokens),
+      decorationOverheadTokens,
       surfaceTokens: surface.surfaceTokens,
       nodes: surface.nodes,
     }))

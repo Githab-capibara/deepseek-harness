@@ -1,0 +1,56 @@
+"""Verify the swarm's `beta` against an independent reference implementation.
+
+The swarm worker wrote `ecosystem-check/b.py`; this script recomputes the same
+sequence without calling `beta`, so the module cannot agree with itself about
+a wrong answer. It covers the specified values, a closed range against the
+reference, and a large value whose exact result is known.
+
+Run it from the repository root:
+
+    python3 ecosystem/scripts/dsh-swarm-beta-check
+"""
+import sys
+import unittest
+from pathlib import Path
+
+SRC = Path(__file__).resolve().parent.parent.parent / 'ecosystem-check'
+sys.path.insert(0, str(SRC))
+
+from b import beta  # noqa: E402
+
+
+def reference(n: int) -> list[int]:
+    """The first ``n`` Fibonacci numbers, computed without ``beta``."""
+    values = []
+    current, following = 0, 1
+    for _ in range(n):
+        values.append(current)
+        current, following = following, current + following
+    return values
+
+
+class BetaContractTests(unittest.TestCase):
+    def test_specified_values(self) -> None:
+        self.assertEqual(beta(0), [])
+        self.assertEqual(beta(1), [0])
+        self.assertEqual(beta(7), [0, 1, 1, 2, 3, 5, 8])
+
+    def test_matches_the_reference(self) -> None:
+        for n in range(0, 60):
+            self.assertEqual(beta(n), reference(n), f'mismatch at n={n}')
+            self.assertEqual(len(beta(n)), n)
+
+    def test_known_large_value(self) -> None:
+        self.assertEqual(beta(50)[-1], 7778742049)
+
+    def test_rejects_a_negative_count(self) -> None:
+        with self.assertRaises(ValueError):
+            beta(-1)
+
+    def test_rejects_a_non_integer(self) -> None:
+        with self.assertRaises(TypeError):
+            beta('7')
+
+
+if __name__ == '__main__':
+    unittest.main()

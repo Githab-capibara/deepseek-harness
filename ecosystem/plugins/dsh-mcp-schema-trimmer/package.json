@@ -1,0 +1,35 @@
+{
+  "name": "dsh-mcp-schema-trimmer",
+  "version": "1.0.0",
+  "description": "Keeps MCP tool schemas readable for the model: a long description is cut to a budget, and an argument the server demands but does not advertise as required is marked required, so the model stops repeating a call the server refuses.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "import": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dsh": ">=0.2.2-rc.1"
+    }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis-plugin",
+    "mcp",
+    "schema"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "*"
+  }
+}

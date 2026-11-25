@@ -1,0 +1,10 @@
+# Bundle layer contributed by dsh-stall-watchdog.
+# It watches the live assistant stream and steers a step that only thinks.
+- insert:
+    - id: stall-watchdog
+      name: dsh-stall-watchdog
+      config:
+        # A step may reason this long without acting before the plugin asks it
+        # to act. Three minutes is long enough for a hard step and short
+        # enough that the user sees a reply rather than a spinner.
+        stallMs: 180000

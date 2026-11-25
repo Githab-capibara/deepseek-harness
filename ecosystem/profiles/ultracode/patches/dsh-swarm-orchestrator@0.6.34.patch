@@ -1,0 +1,62 @@
+diff --git a/lib/dispatch/spawn.js b/lib/dispatch/spawn.js
+index 11f5f8e041b65703bcceb46362f37655eb9287a7..bfe773c00eccb6ae05432a95520268fc93adc832 100644
+--- a/lib/dispatch/spawn.js
++++ b/lib/dispatch/spawn.js
+@@ -345,6 +345,19 @@ export async function spawnTaskAgent(deps, opts) {
+                 }
+                 const failure = opts.failureForChild?.(run.id) ?? (result.stopReason === 'aborted' ? classifyLlmFailure(undefined, true) : undefined);
+                 lastFailureWasFast = opts.legacyEffortHeuristic === true && failure === undefined && outputText(result.output).length === 0 && Date.now() - startedAt < FAST_FAILURE_MS;
++                // A provider-side quota wall (the account ran out of credit mid-attempt)
++                // is a MODEL failure, not a task failure: the next candidate in the
++                // chain may sit on another provider with its own budget. Walk the
++                // chain instead of parking the task on a human hold. The human is
++                // only involved once the whole chain is exhausted.
++                if (failure !== undefined && failure.kind === 'quota' && only === undefined) {
++                    const next = chain[chain.indexOf(candidate) + 1];
++                    if (next !== undefined) {
++                        lastReason = result.diagnostic ?? failure.code ?? lastReason;
++                        opts.onFallback?.(candidate, next);
++                        continue;
++                    }
++                }
+                 return { ok: false, stopReason: result.stopReason, ...(failure !== undefined ? { failure } : {}), reason: result.diagnostic ?? failure?.code ?? `child stopped: ${result.stopReason}`, provider: lastProvider, model: lastModel, childSessionId: run.id };
+             }
+             catch (err) {
+diff --git a/lib/failures.js b/lib/failures.js
+index e6c23c3630c31ff51662e12811c9e1f1e478c1de..905c316044a030cbb2dd61104351a88d4399df31 100644
+--- a/lib/failures.js
++++ b/lib/failures.js
+@@ -7,12 +7,33 @@ export function structuredFailure(value) {
+     return classifyLlmFailure({ code: record.code, ...(typeof record.status === 'number' ? { status: record.status } : {}), ...(typeof record.providerRetryAfterMs === 'number' ? { providerRetryAfterMs: record.providerRetryAfterMs } : {}), ...(typeof record.requestId === 'string' ? { requestId: record.requestId } : {}) });
+ }
+ /** Typed codes/status take priority; elapsed time or empty output prove nothing. */
++/**
++* Detect a provider-side quota wall: the account ran out of credit/budget, so
++* the request was refused with a 403 that carries a quota reason. Upstream
++* providers spell this differently ("insufficient_user_quota", "Not enough
++* quota to pre-consume", "insufficient balance", ...), and the harness usually
++* surfaces it under a generic AUTH code, so the message has to be inspected.
++* @param code - the typed failure code.
++* @param status - the HTTP status, when the provider exposed one.
++* @param message - the raw failure message, when the provider exposed one.
++* @returns true when the failure is a quota wall rather than a bad credential.
++*/
++export function isQuotaFailure(code, status, message) {
++    if (/QUOTA|CREDITS_EXHAUSTED|INSUFFICIENT_BALANCE/.test(code))
++        return true;
++    if (typeof message !== 'string' || message.length === 0)
++        return false;
++    return /insufficient_user_quota|not enough quota|quota (?:exceeded|insufficient|exhausted)|insufficient balance|insufficient funds|\u4f59\u989d\u4e0d\u8db3|\u989d\u5ea6\u4e0d\u8db3|balance is not enough/i.test(message);
++}
+ export function classifyLlmFailure(failure, cancelled = false) {
+     const code = failure?.code ?? 'UNKNOWN';
+     const status = failure?.status;
++    const message = typeof failure?.message === 'string' ? failure.message : '';
+     let kind = 'unknown';
+     if (cancelled || /^(ABORTED|CANCELLED|CANCELED)$/.test(code))
+         kind = 'cancelled';
++    else if (isQuotaFailure(code, status, message))
++        kind = 'quota';
+     else if (status === 401 || status === 403)
+         kind = 'permanent';
+     else if (/^(UNSUPPORTED_REASONING_EFFORT|INVALID_REASONING_EFFORT)$/.test(code))

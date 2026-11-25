@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Reclaim a stale swarm event-store ownership marker.
+#
+# dsh-swarm-orchestrator owns its event store with an EXCLUSIVE, NEVER-EXPIRING
+# marker file ("<events>.owner"). The plugin refuses to start the swarm service
+# while the marker exists and never reclaims it by PID liveness - that is by
+# design (a paused owner must not lose ownership to a new writer).
+#
+# The consequence for an interactive profile: if a TUI session is killed
+# (Ctrl-C twice, SIGKILL, terminal close), its marker survives and EVERY later
+# TUI session starts without a swarm service at all (no swarm_* tools, no
+# board). This helper is the operator-side recovery the plugin demands:
+#
+#   * read the marker, take the recorded PID
+#   * if that PID is alive AND still looks like a dsh process -> REFUSE
+#     (a live writer may still own the store)
+#   * if the PID is gone (or was recycled by a non-dsh process) -> the old
+#     writer is provably stopped, so the marker can be removed safely
+#
+# Usage: dsh-swarm-reclaim <storage-dir> [<storage-dir> ...]
+# Exit code: 0 when every inspected store is clean or reclaimed, 1 when at
+# least one store is still owned by a live writer (nothing was touched there).
+set -uo pipefail
+
+LIVE_MARKERS=0
+
+owner_pid() {
+    # Extract the PID from a marker file: {"pid":123,"nonce":"..."}
+    sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$1" | head -n1
+}
+
+pid_is_dsh() {
+    local pid="$1" cmdline
+    [ -r "/proc/$pid/cmdline" ] || return 1
+    cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+    case "$cmdline" in
+        *dsh*|*node*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+for dir in "$@"; do
+    [ -n "$dir" ] || continue
+    marker="$dir/events.jsonl.owner"
+    if [ ! -e "$marker" ]; then
+        continue
+    fi
+    pid="$(owner_pid "$marker")"
+    if [ -z "$pid" ]; then
+        echo "dsh-swarm-reclaim: $marker has no readable pid - refusing to touch it" >&2
+        LIVE_MARKERS=1
+        continue
+    fi
+    if [ -d "/proc/$pid" ]; then
+        if pid_is_dsh "$pid"; then
+            echo "dsh-swarm-reclaim: $marker is owned by LIVE dsh pid $pid - leaving it alone" >&2
+            LIVE_MARKERS=1
+            continue
+        fi
+        echo "dsh-swarm-reclaim: pid $pid was recycled by a non-dsh process - marker is stale"
+    else
+        echo "dsh-swarm-reclaim: owner pid $pid is gone - marker is stale"
+    fi
+    if rm -f -- "$marker"; then
+        echo "dsh-swarm-reclaim: reclaimed $marker"
+    else
+        echo "dsh-swarm-reclaim: failed to remove $marker" >&2
+        LIVE_MARKERS=1
+    fi
+done
+
+exit "$LIVE_MARKERS"

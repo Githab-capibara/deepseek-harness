@@ -1,0 +1,41 @@
+{
+  "name": "dsh-local-ru",
+  "version": "1.0.0",
+  "description": "Русская локализация плагинов DeepSeek Harness, которых нет в dsh-russian-lang: swarm-orchestrator, baseline, context-decay, session-retry, stall-guard, second-review, agent-loop-guard, auto-review, agent-frugality, verify-kit, verify-judge, protect-tests, task-reliability, ultracode, subagent-guard, stalegreen. Названия технологий и API остаются на английском, остальное переводится.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "import": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./translations": "./lib/translations.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "lib/tables",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    },
+    "compatibility": {
+      "dsh": ">=0.2.0-rc.1"
+    }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "russian",
+    "locale",
+    "i18n"
+  ]
+}

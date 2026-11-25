@@ -1,0 +1,13 @@
+# Bundle layer contributed by dsh-swarm-worktree.
+# It needs the dsh-worktree service (ctx.worktree) for the worktree
+# bookkeeping and the swarm service (ctx.swarm) for the task lifecycle.
+- insert:
+    - id: swarm-worktree
+      name: dsh-swarm-worktree
+      config:
+        debug: true
+        # Merge accepted work back into the branch the run was dispatched from.
+        mergeOnAccept: true
+        # Branch the merged commits land on. Empty = the repository's current
+        # branch at dispatch time (normally `main`).
+        targetBranch: main

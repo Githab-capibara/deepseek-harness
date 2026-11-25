@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""Collect the English UI keys of the swarm stack plugins.
+
+The panels pick their text through `t(key)`, which first asks the locale
+runtime and falls back to the plugin's own English table. A Russian
+dictionary must therefore use EXACTLY the same keys. This script extracts the
+key sets from the English tables that are handed to `locale.register`.
+
+The scan is a plain character walk (no regex over the whole file): a regular
+expression over these bundles backtracks catastrophically.
+"""
+import json
+import os
+import sys
+import tempfile
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+HOME = os.environ.get("DSH_HOME", "/home/d/.dsh")
+PROFILE_MODULES = os.path.join(HOME, "profiles", "web", "node_modules")
+
+PLUGINS = [
+    (os.path.join(PROFILE_MODULES, "dsh-swarm-orchestrator"), "lib/client.js", "swarm"),
+    (os.path.join(PROFILE_MODULES, "dsh-baseline"), "lib/client.js", "dsh-baseline"),
+    (os.path.join(PROFILE_MODULES, "dsh-context-decay"), "lib/client.js", "contextDecay"),
+    (os.path.join(PROFILE_MODULES, "dsh-session-retry"), "lib/client.js", "session-retry"),
+    (os.path.join(PROFILE_MODULES, "dsh-stall-guard"), "client.js", "dsh.stallGuard"),
+    (os.path.join(PROFILE_MODULES, "@goodandready", "dsh-agent-loop-guard"), "lib/client.js", "@goodandready/dsh-agent-loop-guard"),
+    (os.path.join(PROFILE_MODULES, "dsh-auto-review"), "lib/client.js", "autoReviewPanel"),
+    (os.path.join(PROFILE_MODULES, "dsh-protect-tests"), "client.js", "plugin.dsh-protect-tests"),
+]
+
+IDENT_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$")
+
+
+def object_body(text: str, start: int) -> str:
+    """The object literal that starts at `start` (its opening brace)."""
+    depth = 0
+    index = start
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+        elif char in "\"'":
+            quote = char
+            index += 1
+            while index < length and text[index] != quote:
+                if text[index] == "\\":
+                    index += 1
+                index += 1
+        index += 1
+    return ""
+
+
+def find_table(text: str, name: str) -> str:
+    """The object literal assigned to `name`."""
+    needle = name
+    search = 0
+    while True:
+        index = text.find(needle, search)
+        if index == -1:
+            return ""
+        before = text[index - 1] if index > 0 else " "
+        after = text[index + len(needle)] if index + len(needle) < len(text) else " "
+        if before not in IDENT_CHARS and after not in IDENT_CHARS:
+            # The declaration may sit a few characters before the name.
+            prefix = text[max(0, index - 40):index]
+            if "const " in prefix or "let " in prefix or "var " in prefix:
+                brace = text.find("{", index)
+                if brace != -1 and brace - index < 80:
+                    return object_body(text, brace)
+        search = index + 1
+
+
+def table_keys(body: str) -> list[str]:
+    """The keys of an object literal, in order.
+
+    A key is either a quoted string or a bare identifier (`title: '…'`).
+    """
+    keys: list[str] = []
+    index = 0
+    length = len(body)
+    while index < length:
+        char = body[index]
+        if char in "\"'":
+            quote = char
+            start = index + 1
+            index = start
+            while index < length and body[index] != quote:
+                if body[index] == "\\":
+                    index += 1
+                index += 1
+            key = body[start:index]
+            index += 1
+            probe = index
+            while probe < length and body[probe] in " \t\r\n":
+                probe += 1
+            if probe < length and body[probe] == ":":
+                if key and key not in keys:
+                    keys.append(key)
+            continue
+        if char in IDENT_CHARS:
+            start = index
+            while index < length and body[index] in IDENT_CHARS:
+                index += 1
+            word = body[start:index]
+            probe = index
+            while probe < length and body[probe] in " \t\r\n":
+                probe += 1
+            if probe < length and body[probe] == ":" and word not in keys:
+                keys.append(word)
+            continue
+        index += 1
+    return keys
+
+
+def call_arguments(text: str, open_paren: int) -> str:
+    """The argument text of a call that starts at `open_paren`."""
+    depth = 0
+    index = open_paren
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_paren + 1:index]
+        elif char in "\"'":
+            quote = char
+            index += 1
+            while index < length and text[index] != quote:
+                if text[index] == "\\":
+                    index += 1
+                index += 1
+        index += 1
+    return text[open_paren + 1:open_paren + 300]
+
+
+def re_is_shorthand(text: str, name: str) -> bool:
+    """Whether the text holds `{ ..., name, ... }` shorthand for a table."""
+    probe = 0
+    length = len(text)
+    while probe < length:
+        char = text[probe]
+        if char in "\"'":
+            quote = char
+            probe += 1
+            while probe < length and text[probe] != quote:
+                probe += 1
+            probe += 1
+            continue
+        if char in IDENT_CHARS:
+            start = probe
+            while probe < length and text[probe] in IDENT_CHARS:
+                probe += 1
+            word = text[start:probe]
+            if word == name:
+                return True
+            continue
+        probe += 1
+    return False
+
+
+def extract(text: str) -> list[str]:
+    """Every key of every English table the plugin registers."""
+    keys: list[str] = []
+    search = 0
+    while True:
+        index = text.find("locale.register(", search)
+        if index == -1:
+            break
+        search = index + 1
+        call = call_arguments(text, index + len("locale.register("))
+        # Form 1: register(NS, "en", en)
+        marker = call.find('"en"')
+        if marker == -1:
+            marker = call.find("'en'")
+        if marker != -1:
+            # Skip the quoted locale id and the separator after it.
+            tail = call[marker:]
+            tail = tail[tail.find("\""):] if "\"" in tail else tail[tail.find("'"):]
+            tail = tail[1:]
+            while tail and (tail[0] in " \t\r\n" or tail[0] == ","):
+                tail = tail[1:]
+            name = ""
+            for char in tail:
+                if char in IDENT_CHARS:
+                    name += char
+                else:
+                    break
+            if name:
+                for key in table_keys(find_table(text, name)):
+                    if key not in keys:
+                        keys.append(key)
+                continue
+        # Form 2: register(NS, { en, zh }) — shorthand for the tables.
+        brace = call.find("{")
+        if brace == -1:
+            continue
+        outer = object_body(call, brace)
+        shorthand_part = outer[1:-1] if outer.startswith("{") else outer
+        if re_is_shorthand(shorthand_part, "en"):
+            for key in table_keys(find_table(text, "en")):
+                if key not in keys:
+                    keys.append(key)
+            continue
+        # Form 3: register(NS, { en: { ... }, zh: { ... } })
+        en_at = outer.find("en:")
+        if en_at == -1:
+            continue
+        inner_brace = outer.find("{", en_at)
+        if inner_brace == -1:
+            continue
+        inner = object_body(outer, inner_brace)
+        for key in table_keys(inner):
+            if key not in keys:
+                keys.append(key)
+    return keys
+
+
+def main() -> int:
+    result = {}
+    for root, relative, namespace in PLUGINS:
+        path = os.path.join(root, relative)
+        if not os.path.exists(path):
+            print(f"{namespace}: file missing", file=sys.stderr)
+            continue
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        keys = extract(text)
+        result[namespace] = keys
+        print(f"{namespace}: {len(keys)} keys")
+    out = "/tmp/opencode/ru-keys.json"
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(result, fh, ensure_ascii=False, indent=1)
+    print(f"written: {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
