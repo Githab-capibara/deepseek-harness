@@ -1,0 +1,9 @@
+# Bundle layer contributed by dsh-mcp-schema-trimmer.
+# It keeps the MCP tool catalogue readable for the model.
+- insert:
+    - id: mcp-schema-trimmer
+      name: dsh-mcp-schema-trimmer
+      config:
+        # The model reads a long description as noise: past this budget it
+        # starts losing the arguments it needs.
+        descriptionLimit: 2000

@@ -23,7 +23,7 @@ import { name } from './constants.js';
 export { name };
 
 /** How long a step may reason without acting before the plugin intervenes. */
-const DEFAULT_STALL_MS = 180000;
+const DEFAULT_STALL_MS = 300000;
 
 /** The message the plugin sends when a step only thinks. */
 const DEFAULT_NUDGE_TEXT = [
@@ -33,11 +33,25 @@ const DEFAULT_NUDGE_TEXT = [
     'если нужен план — вызови exit_plan_mode.',
 ].join(' ');
 
+/** The message the plugin sends when a step only collects refused calls. */
+const DEFAULT_REFUSAL_NUDGE_TEXT = [
+    'Твой последний вызов инструмента был отклонён: тот же вызов уже не даёт нового результата.',
+    'Не повторяй его. Смени стратегию: используй другой инструмент или другой источник данных,',
+    'либо дай итоговый ответ по тому, что уже проверено.',
+].join(' ');
+
+/** How many refused calls end a turn. */
+const DEFAULT_MAX_REFUSALS = 2;
+
 export const Config = z.object({
     /** How long a step may reason without acting before the plugin intervenes. */
     stallMs: z.number().default(DEFAULT_STALL_MS).volatile(),
     /** The message the plugin sends when a step only thinks. */
     nudgeText: z.string().default(DEFAULT_NUDGE_TEXT).volatile(),
+    /** How many refused tool calls end a turn before the plugin intervenes. */
+    maxRefusals: z.number().default(DEFAULT_MAX_REFUSALS).volatile(),
+    /** The message the plugin sends when a step only collects refused calls. */
+    refusalNudgeText: z.string().default(DEFAULT_REFUSAL_NUDGE_TEXT).volatile(),
 });
 
 /**
@@ -68,9 +82,12 @@ export function readConfig(raw) {
     if (raw === null || typeof raw !== 'object')
         raw = {};
     const stallMs = Number(readField(raw.stallMs, DEFAULT_STALL_MS));
+    const maxRefusals = Number(readField(raw.maxRefusals, DEFAULT_MAX_REFUSALS));
     return {
         stallMs: Number.isFinite(stallMs) && stallMs > 0 ? stallMs : DEFAULT_STALL_MS,
         nudgeText: String(readField(raw.nudgeText, DEFAULT_NUDGE_TEXT)),
+        maxRefusals: Number.isFinite(maxRefusals) && maxRefusals > 0 ? maxRefusals : DEFAULT_MAX_REFUSALS,
+        refusalNudgeText: String(readField(raw.refusalNudgeText, DEFAULT_REFUSAL_NUDGE_TEXT)),
     };
 }
 
@@ -88,7 +105,33 @@ class StepWatch {
         this.acted = false;
         /** Whether the plugin already spoke about this step. */
         this.spoken = false;
+        /** How many tool calls came back refused in this step. */
+        this.refusals = 0;
     }
+}
+
+/**
+ * Whether a tool result carries a refusal the model must not retry.
+ *
+ * The loop guard answers a repeated call with an error that names the
+ * repetition, and the text tells the model to stop. The model can still ignore
+ * that, so the watchdog counts refusals: a step that only collects refusals
+ * makes no progress, and a turn that ends this way must not spin until the
+ * turn budget runs out.
+ *
+ * @param {any} result - the tool execution result.
+ * @returns {boolean} whether the result refused the call.
+ */
+function isRefusal(result) {
+    if (result?.isError !== true)
+        return false;
+    const error = result.error;
+    const text = [
+        error?.message,
+        error?.reason,
+        typeof error === 'string' ? error : undefined,
+    ].filter((part) => typeof part === 'string').join(' ');
+    return /LOOP_GUARD|no productive progress|ACTION REQUIRED|repeated without/i.test(text);
 }
 
 /**
@@ -103,11 +146,23 @@ export async function apply(ctx, config) {
     const logger = ctx.logger?.('stall-watchdog');
     const note = (message) => {
         if (logger !== undefined && typeof logger.info === 'function')
-            logger.info('%s', message);
+            logger.info(message);
     };
 
     /** The step the watchdog currently watches, per agent. */
     const watches = new WeakMap();
+
+    /**
+     * Whether the current turn already produced a tool call.
+     *
+     * A turn that has already called a tool is working, however long its next
+     * step reasons. Only a turn that has produced nothing at all is stalled,
+     * so the watchdog must not interrupt a productive turn that pauses.
+     */
+    const productiveTurns = new WeakMap();
+
+    /** The turn each agent is currently in, so a new turn resets productivity. */
+    const lastTurn = new WeakMap();
 
     /**
      * The watchdog's own state for one agent.
@@ -127,7 +182,22 @@ export async function apply(ctx, config) {
     // `agent/pre-step` is a waterfall: the listener must delegate, or the
     // next listener receives no decision at all.
     ctx.on('agent/pre-step', async ({ agent, turn, step }, next) => {
-        stateOf(agent).current = new StepWatch(agent, turn, step);
+        const watch = new StepWatch(agent, turn, step);
+        // A new turn starts unproductive; a step inside a turn inherits the
+        // turn's productivity.
+        if (watch.turn !== lastTurn.get(agent)) {
+            productiveTurns.set(agent, false);
+            lastTurn.set(agent, watch.turn);
+        }
+        stateOf(agent).current = watch;
+        return next();
+    });
+
+    // A real tool call marks the turn productive: the agent is acting, and a
+    // long pause between calls is not a stall.
+    ctx.on('tools/execute', (execution, next) => {
+        if (execution?.agent !== undefined)
+            productiveTurns.set(execution.agent, true);
         return next();
     });
 
@@ -152,19 +222,60 @@ export async function apply(ctx, config) {
         }
     });
 
+    // A refused call is not progress. The loop guard tells the model to stop
+    // repeating; when the model repeats anyway, the turn has to end, or the
+    // agent spends the whole turn budget on the same refusal.
+    ctx.on('tools/result', (execution, result) => {
+        const agent = execution?.agent;
+        if (agent === undefined || !isRefusal(result))
+            return;
+        const watch = stateOf(agent).current;
+        if (watch === undefined)
+            return;
+        watch.refusals += 1;
+        if (watch.refusals < settings.maxRefusals)
+            return;
+        if (watch.spoken)
+            return;
+        watch.spoken = true;
+        note(`step ${watch.turn}/${watch.step} collected ${watch.refusals} refused calls; ending the turn`);
+        try {
+            agent.cancel({ kind: 'hook', reason: 'dsh-stall-watchdog: the step only collected refused tool calls' });
+            agent.followup(createUserMessage({
+                content: [{
+                    type: 'text',
+                    text: settings.refusalNudgeText,
+                }],
+                source: { kind: 'user' },
+            }));
+        }
+        catch (error) {
+            note(`the refusal interrupt failed: ${String(error)}`);
+        }
+    });
+
     ctx.inject(['agents'], (agentCtx) => {
         agentCtx.effect(() => {
             const timer = setInterval(() => {
                 const now = Date.now();
-                const agents = agentCtx.agents?.list?.() ?? [];
+                // The service is read through the context that owns it, so the
+                // plugin works whether the host exposes it as a property or only
+                // through `get`.
+                const service = agentCtx.agents ?? ctx.get('agents');
+                const agents = service?.list?.() ?? [];
                 for (const agent of agents) {
                     const watch = stateOf(agent).current;
-                    if (watch === undefined || watch.acted || watch.spoken)
+                    if (watch === undefined || watch.spoken)
+                        continue;
+                    // A turn that already called a tool is working, however long
+                    // its next step reasons. Only a turn that has produced
+                    // nothing at all is stalled.
+                    if (productiveTurns.get(agent) === true)
                         continue;
                     if (now - watch.lastActivity < settings.stallMs)
                         continue;
                     watch.spoken = true;
-                    note(`step ${watch.turn}/${watch.step} reasoned for ${Math.round((now - watch.lastActivity) / 1000)}s without acting; interrupting it`);
+                    note(`turn ${watch.turn} produced nothing for ${Math.round((now - watch.lastActivity) / 1000)}s; interrupting it`);
                     try {
                         // The step is already running, so steering it would only
                         // queue a message for a step that never ends. The turn

@@ -76,6 +76,7 @@ PLUGIN_DEPS = {
     "dsh-git-worktree": "github:KHG420/git-worktree",
     "dsh-gitnexus-plugin": "github:akash-digitavision/dsh-gitnexus-plugin",
     "dsh-context-decay": "github:LDyty/dsh-context-decay",
+    "dsh-mcp-schema-trimmer": local_plugin("dsh-mcp-schema-trimmer"),
     "dsh-stall-watchdog": local_plugin("dsh-stall-watchdog"),
     # dsh-harden ловит «тихую» остановку: ход, который выдал только
     # reasoning без ответа и без вызова инструмента, проглоченную ошибку
@@ -148,6 +149,7 @@ PLUGIN_BUNDLES = [
     "dsh-swarm-autonomy-guard",
     "dsh-swarm-worktree",
     "dsh-plan-auto-review",
+    "dsh-mcp-schema-trimmer",
     "dsh-stall-watchdog",
     "@goodandready/dsh-agent-loop-guard",
     "dsh-baseline",
@@ -406,7 +408,7 @@ def install(name):
     # matches, so a changed local plugin would never reach the profile.
     # Dropping the copied directory forces a fresh copy on install.
     for package in ("dsh-local-ru", "dsh-swarm-worktree", "dsh-swarm-autonomy-guard",
-                    "dsh-subagent-compat", "dsh-plan-auto-review", "dsh-stall-watchdog"):
+                    "dsh-subagent-compat", "dsh-plan-auto-review", "dsh-stall-watchdog", "dsh-mcp-schema-trimmer"):
         shutil.rmtree(os.path.join(directory, "node_modules", package), ignore_errors=True)
     result = subprocess.run(["pnpm", "install", "--prefer-offline"], cwd=directory,
                             capture_output=True, text=True, timeout=1800)

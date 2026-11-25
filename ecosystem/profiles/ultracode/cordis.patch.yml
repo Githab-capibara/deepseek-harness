@@ -47,6 +47,14 @@
                            that the task is complex is your job. Work single-handed only when the
                            task is one indivisible step. You orchestrate and verify; workers execute.
                            Reuse existing patterns and machinery over new ones.
+                           6. Explore the CODE with the graph first. The mcp__gitnexus__* tools
+                           hold an indexed knowledge graph of the code: its files, symbols,
+                           call chains and execution flows. Before reading source files one by
+                           one, ask the graph where a symbol lives, who calls it, and which
+                           flows reach it - mcp__gitnexus__context, mcp__gitnexus__query,
+                           mcp__gitnexus__explain, mcp__gitnexus__impact. The graph indexes
+                           code, not prose: for documents, READ and GREP are the right tools.
+                           Re-reading one file for the same reason is a loop, not exploration.
                         4. Write long, complete answers when the task warrants. Full implementations, not
                            sketches. A verified, runnable result is the goal; truncating to save tokens is
                            not.

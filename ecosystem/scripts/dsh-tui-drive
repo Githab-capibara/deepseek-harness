@@ -1,9 +1,4 @@
-"""Drive the TUI with a task whose file lives inside the repository.
-
-The swarm worker writes inside its own worktree, so the task names a path
-under the repository. The check then reports whether the file exists in the
-main tree or in a worktree.
-"""
+"""Drive the TUI on a reconnaissance task and report the trajectory."""
 import os
 import pty
 import select
@@ -12,8 +7,9 @@ import sys
 import time
 
 TASK = ' '.join(sys.argv[1:]) or (
-    'Создай файл ecosystem-check/agent-demo/notes.txt с тремя строками: alpha, beta, gamma. '
-    'Затем прочитай этот файл обратно и покажи его содержимое.'
+    'Изучи репозиторий /home/d/my/fs-rs: прочитай документ '
+    'docs/adr/ADR-05-foq-as-the-only-local-model.md и объясни, что такое FOQ '
+    'и как он связан с локальными моделями. Ответь текстом.'
 )
 DURATION = int(os.environ.get('DSH_TUI_SECONDS', '900'))
 OUT = os.environ.get('DSH_TUI_OUT', '/tmp/opencode/tui-screen.txt')
